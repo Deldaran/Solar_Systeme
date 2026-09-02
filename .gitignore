@@ -1,0 +1,19 @@
+# Build CMake (contient aussi les sources telechargees de GLFW/GLM/ImGui)
+build/
+cmake-build-*/
+
+# Etat de fenetre ImGui — propre a chaque machine
+imgui.ini
+
+# Binaires
+*.o
+*.a
+*.dSYM/
+SolarSystem
+SolarSystem.exe
+
+# OS / editeurs
+.DS_Store
+.vscode/
+.idea/
+compile_commands.json
