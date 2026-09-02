@@ -1,10 +1,14 @@
 #pragma once
 
 // ════════════════════════════════════════════════════════════════════════
-//  Camera.hpp — Caméra orbitale avec Floating Origin (SOLID: SRP)
-//  - Double précision pour la position monde (CPU)
-//  - Float pour la rotation envoyée au GPU
-//  - Séparation rotation / translation (évite les erreurs d'arrondi)
+//  Camera.hpp — Caméra orbitale contextuelle (SOLID: SRP)
+//
+//  La caméra vit dans un contexte, comme tout le reste. Au rendu elle est
+//  à l'origine : les corps lui sont envoyés relativement à elle, résolus
+//  par la chaîne de contextes en float64 puis convertis en float.
+//
+//  Les contextes ne tournent pas (translations pures), donc la matrice de
+//  rotation se calcule identiquement dans n'importe quel contexte.
 // ════════════════════════════════════════════════════════════════════════
 
 #include "Constants.hpp"
@@ -14,9 +18,12 @@
 
 class Camera {
 public:
-    // ── Floating Origin : position absolue (km, double) ──────────────
-    glm::dvec3 posWorld = { 0.0, 0.0, Constants::AU_KM * 3.0 };
-    glm::dvec3 target   = { 0.0, 0.0, 0.0 };  // point suivi (km, double)
+    // ── Contexte courant ──────────────────────────────────────────────
+    int        frame  = 0;
+
+    // ── Position et cible, LOCALES à `frame` (km, double) ─────────────
+    glm::dvec3 pos    = { 0.0, 0.0, Constants::AU_KM * 3.0 };
+    glm::dvec3 target = { 0.0, 0.0, 0.0 };
 
     // ── Paramètres orbitaux ───────────────────────────────────────────
     float theta    = 0.f;                           // azimut (rad)
@@ -24,39 +31,35 @@ public:
     float distance = float(Constants::AU_KM * 3.0); // distance orbite (km)
     float fov      = 60.f;                          // champ de vue (degrés)
 
-    // ─────────────────────────────────────────────────────────────────
-    //  Recalcule posWorld depuis (target, theta, phi, distance)
-    //  Appeler après tout changement d'angle ou de cible.
-    // ─────────────────────────────────────────────────────────────────
+    // Recalcule pos depuis (target, theta, phi, distance)
     void updateFromOrbit() {
         double r = static_cast<double>(distance);
-        posWorld = target + glm::dvec3(
+        pos = target + glm::dvec3(
             r * std::cos(phi) * std::sin(theta),
             r * std::sin(phi),
             r * std::cos(phi) * std::cos(theta)
         );
     }
 
-    // Direction forward (double précision)
     glm::dvec3 forward() const {
-        return glm::normalize(target - posWorld);
+        return glm::normalize(target - pos);
     }
 
     // ─────────────────────────────────────────────────────────────────
     //  Matrice de ROTATION pure (float) — sans aucune translation.
-    //  Principe : la translation est absorbée dans posRel côté GPU
-    //  (Floating Origin), donc la matrice view ne contient QUE la rotation.
-    //  Inverse = transposée car la matrice est orthogonale.
+    //  La translation est absorbée côté CPU en double : la matrice envoyée
+    //  au GPU ne contient QUE la rotation. Inverse = transposée
+    //  (matrice orthogonale).
     // ─────────────────────────────────────────────────────────────────
     glm::mat4 rotationMatrix() const {
-        glm::dvec3 fwd = glm::normalize(target - posWorld);
+        glm::dvec3 fwd = glm::normalize(target - pos);
         glm::dvec3 wup = glm::dvec3(0, 1, 0);
         if (glm::abs(glm::dot(fwd, wup)) > 0.999)
             wup = glm::dvec3(0, 0, 1);
         glm::dvec3 rgt = glm::normalize(glm::cross(fwd, wup));
         glm::dvec3 up  = glm::cross(rgt, fwd);
 
-        // Colonne-major OpenGL : chaque colonne = un axe de base
+        // Column-major OpenGL : chaque groupe de 4 = une colonne
         return glm::mat4(
             float(rgt.x), float(up.x), float(-fwd.x), 0.f,
             float(rgt.y), float(up.y), float(-fwd.y), 0.f,
@@ -65,7 +68,6 @@ public:
         );
     }
 
-    // Matrice rotation inverse (rotation vers espace monde depuis espace caméra)
     glm::mat4 invRotationMatrix() const {
         return glm::transpose(rotationMatrix());
     }

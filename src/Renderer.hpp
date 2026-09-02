@@ -2,16 +2,18 @@
 
 // ════════════════════════════════════════════════════════════════════════
 //  Renderer.hpp — Pipeline OpenGL (SOLID: SRP)
-//  Responsabilité unique : init GL, upload des uniformes, draw calls.
 //
-//  Les emplacements d'uniformes sont résolus UNE FOIS à l'init.
-//  L'ancienne version faisait 4 snprintf + 4 glGetUniformLocation par corps
-//  et par frame (lookup par chaîne dans le driver) : 128 lookups/frame à
-//  32 corps.
+//  Le seul endroit où l'on passe de float64 à float32. La règle : résoudre
+//  la position d'un corps RELATIVEMENT à la caméra en double, en remontant
+//  la chaîne de contextes (jamais via une coordonnée absolue), puis caster.
+//  Le résultat est un petit nombre → le float32 est largement suffisant.
+//
+//  Les emplacements d'uniformes sont résolus une seule fois à l'init.
 // ════════════════════════════════════════════════════════════════════════
 
 #include "GL.hpp"
 #include "Body.hpp"
+#include "Frame.hpp"
 #include "Camera.hpp"
 #include "Frustum.hpp"
 #include "Shaders.hpp"
@@ -26,7 +28,6 @@
 
 class Renderer {
 public:
-    // ── Init : compile les shaders, crée les buffers ──────────────────
     void init() {
         buildQuad();
         buildTrailBuffer();
@@ -49,22 +50,31 @@ public:
         m_tTrailColor = glGetUniformLocation(m_trailProg, "uTrailColor");
     }
 
-    // ── Passe corps : ray casting plein écran ─────────────────────────
+    // ── Passe corps ───────────────────────────────────────────────────
     void draw(const Camera& cam, const std::vector<Body>& bodies,
-              int fbW, int fbH, float exposure = 1.f)
+              const FrameGraph& fg, int fbW, int fbH, float exposure = 1.f)
     {
         if (fbW <= 0 || fbH <= 0) return;            // fenêtre minimisée
         m_aspect = double(fbW) / double(fbH);
-
         m_frustum.build(cam, m_aspect);
-        m_visible = m_frustum.cull(bodies);
-        m_count   = std::min((int)m_visible.size(), Constants::MAX_BODIES);
 
-        // Positions relatives à la caméra : soustraction en double, PUIS
-        // cast en float — jamais l'inverse.
-        m_relPos.resize(m_count);
-        for (int i = 0; i < m_count; ++i)
-            m_relPos[i] = glm::vec3(m_visible[i]->pos - cam.posWorld);
+        // ── Résolution contextuelle → espace caméra-relatif (double) ──
+        m_visible.clear();
+        m_relPos.clear();
+        for (const auto& b : bodies) {
+            glm::dvec3 rel = fg.separation(cam.pos, cam.frame,
+                                           b.pos,   b.frame, bodies);
+            // Les étoiles ne sont jamais cullées : le shader y cherche sa
+            // source de lumière, et le halo doit rester visible hors champ.
+            if (b.emissive > 0.5f ||
+                m_frustum.testSphere(rel, double(b.visualRadius())))
+            {
+                if ((int)m_visible.size() >= Constants::MAX_BODIES) break;
+                m_visible.push_back(&b);
+                m_relPos.push_back(glm::vec3(rel));   // cast float ICI, et ici seulement
+            }
+        }
+        m_count = (int)m_visible.size();
 
         double fovRad = glm::radians(double(cam.fov));
         m_halfH = float(std::tan(fovRad * 0.5));
@@ -86,20 +96,28 @@ public:
         glUseProgram(0);
     }
 
-    // ── Passe trail : ligne d'orbite ──────────────────────────────────
+    // ── Passe trail ───────────────────────────────────────────────────
+    // Les points du trail sont stockés dans le contexte `trailFrame` :
+    // l'orbite terrestre se referme donc exactement dans le repère du
+    // Soleil, et celle de la Lune dans le repère de la Terre.
     // À appeler APRÈS draw() (réutilise la liste de corps visibles).
     void drawTrail(const Camera& cam, const std::deque<glm::dvec3>& trail,
-                   const glm::vec3& color)
+                   int trailFrame, const FrameGraph& fg,
+                   const std::vector<Body>& bodies, const glm::vec3& color)
     {
-        if (trail.size() < 2) return;
+        if (trail.size() < 2 || !fg.valid(trailFrame)) return;
 
-        const int n = std::min((int)trail.size(), Simulation_TRAIL_MAX);
+        const int n = std::min((int)trail.size(), TRAIL_CAPACITY);
+        const int first = (int)trail.size() - n;
+
+        // L'offset contexte→caméra est constant sur tout le trail : on le
+        // calcule une fois, puis une simple soustraction par point.
+        glm::dvec3 off = fg.originOffset(trailFrame, cam.frame, bodies) - cam.pos;
+
         m_trailVerts.clear();
         m_trailVerts.reserve(n * 3);
-        // Les points les plus récents sont à la fin du deque.
-        const int first = (int)trail.size() - n;
         for (int i = 0; i < n; ++i) {
-            glm::vec3 p = glm::vec3(trail[first + i] - cam.posWorld);
+            glm::vec3 p = glm::vec3(trail[first + i] + off);
             m_trailVerts.push_back(p.x);
             m_trailVerts.push_back(p.y);
             m_trailVerts.push_back(p.z);
@@ -141,12 +159,10 @@ public:
         glDeleteProgram(m_trailProg);
     }
 
-private:
-    // Doit rester >= Simulation::TRAIL_MAX (évite d'inclure Simulation.hpp
-    // ici, ce qui créerait une dépendance circulaire de responsabilités).
-    static constexpr int Simulation_TRAIL_MAX = 3000;
+    // Doit rester >= Simulation::TRAIL_MAX
+    static constexpr int TRAIL_CAPACITY = 4000;
 
-    // ── Emplacements d'uniformes par corps, résolus une seule fois ────
+private:
     struct BodyLoc { GLint posRel, radius, color, emissive; };
 
     GLuint m_vao = 0, m_vbo = 0, m_prog = 0;
@@ -170,11 +186,11 @@ private:
         char buf[64];
         for (int i = 0; i < Constants::MAX_BODIES; ++i) {
             snprintf(buf, sizeof buf, "uBodies[%d].posRel", i);
-            out[i].posRel = glGetUniformLocation(prog, buf);
+            out[i].posRel   = glGetUniformLocation(prog, buf);
             snprintf(buf, sizeof buf, "uBodies[%d].radius", i);
-            out[i].radius = glGetUniformLocation(prog, buf);
+            out[i].radius   = glGetUniformLocation(prog, buf);
             snprintf(buf, sizeof buf, "uBodies[%d].color", i);
-            out[i].color = glGetUniformLocation(prog, buf);
+            out[i].color    = glGetUniformLocation(prog, buf);
             snprintf(buf, sizeof buf, "uBodies[%d].emissive", i);
             out[i].emissive = glGetUniformLocation(prog, buf);
         }
@@ -211,7 +227,7 @@ private:
         glBindVertexArray(m_trailVao);
         glBindBuffer(GL_ARRAY_BUFFER, m_trailVbo);
         glBufferData(GL_ARRAY_BUFFER,
-                     (GLsizeiptr)(Simulation_TRAIL_MAX * 3 * sizeof(float)),
+                     (GLsizeiptr)(TRAIL_CAPACITY * 3 * sizeof(float)),
                      nullptr, GL_DYNAMIC_DRAW);
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), nullptr);
