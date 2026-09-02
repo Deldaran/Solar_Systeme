@@ -16,6 +16,7 @@
 #include "Frame.hpp"
 #include "Camera.hpp"
 #include "Frustum.hpp"
+#include "Occlusion.hpp"
 #include "Shaders.hpp"
 #include "Constants.hpp"
 
@@ -62,20 +63,51 @@ public:
         m_frustum.build(cam, m_aspect);
 
         // ── Résolution contextuelle → espace caméra-relatif (double) ──
+        // On résout TOUS les corps, puis on choisit lesquels envoyer.
+        m_rel.resize(bodies.size());
+        for (size_t i = 0; i < bodies.size(); ++i)
+            m_rel[i] = fg.separation(cam.pos, cam.frame,
+                                     bodies[i].pos, bodies[i].frame, bodies);
+
+        // ── Sélection ────────────────────────────────────────────────
+        // Le shader ne connaît que les corps qu'on lui envoie : il y
+        // cherche sa source de lumière ET ses occulteurs. Un corps retiré
+        // du lot cesse donc d'exister — d'où les ombres qui disparaissent
+        // quand leur projeteur sort du champ.
+        m_keep.assign(bodies.size(), 0);
+
+        // 1. Les étoiles, toujours : lumière + halo.
+        for (size_t i = 0; i < bodies.size(); ++i)
+            if (bodies[i].emissive > 0.5f) m_keep[i] = 1;
+
+        // 2. Ce qui est effectivement à l'écran.
+        for (size_t i = 0; i < bodies.size(); ++i)
+            if (m_frustum.testSphere(m_rel[i], double(bodies[i].visualRadius())))
+                m_keep[i] = 1;
+
+        // 3. Ce qui projette une ombre sur un corps retenu, même hors champ.
+        const size_t nVisible = bodies.size();
+        for (size_t a = 0; a < nVisible; ++a) {
+            if (!m_keep[a] || bodies[a].emissive > 0.5f) continue;
+            for (size_t l = 0; l < nVisible; ++l) {
+                if (bodies[l].emissive < 0.5f) continue;
+                for (size_t b = 0; b < nVisible; ++b) {
+                    if (b == a || m_keep[b] || bodies[b].emissive > 0.5f) continue;
+                    if (Occlusion::castsShadow(m_rel[a], double(bodies[a].visualRadius()),
+                                    m_rel[l],
+                                    m_rel[b], double(bodies[b].visualRadius())))
+                        m_keep[b] = 1;
+                }
+            }
+        }
+
         m_visible.clear();
         m_relPos.clear();
-        for (const auto& b : bodies) {
-            glm::dvec3 rel = fg.separation(cam.pos, cam.frame,
-                                           b.pos,   b.frame, bodies);
-            // Les étoiles ne sont jamais cullées : le shader y cherche sa
-            // source de lumière, et le halo doit rester visible hors champ.
-            if (b.emissive > 0.5f ||
-                m_frustum.testSphere(rel, double(b.visualRadius())))
-            {
-                if ((int)m_visible.size() >= Constants::MAX_BODIES) break;
-                m_visible.push_back(&b);
-                m_relPos.push_back(glm::vec3(rel));   // cast float ICI, et ici seulement
-            }
+        for (size_t i = 0; i < bodies.size(); ++i) {
+            if (!m_keep[i]) continue;
+            if ((int)m_visible.size() >= Constants::MAX_BODIES) break;
+            m_visible.push_back(&bodies[i]);
+            m_relPos.push_back(glm::vec3(m_rel[i]));  // cast float ICI, et ici seulement
         }
         m_count = (int)m_visible.size();
 
@@ -154,6 +186,9 @@ public:
 
     int visibleCount() const { return m_count; }
 
+    // Corps réellement transmis au shader (diagnostic)
+    const std::vector<const Body*>& uploaded() const { return m_visible; }
+
     void cleanup() {
         glDeleteVertexArrays(1, &m_vao);
         glDeleteBuffers(1, &m_vbo);
@@ -180,6 +215,8 @@ private:
           m_tBodyCount = -1, m_tTrailColor = -1;
 
     Frustum                  m_frustum;
+    std::vector<glm::dvec3>  m_rel;
+    std::vector<char>        m_keep;
     std::vector<const Body*> m_visible;
     std::vector<glm::vec3>   m_relPos;
     std::vector<float>       m_trailVerts;

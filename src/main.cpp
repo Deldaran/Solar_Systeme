@@ -195,6 +195,7 @@ struct ShotOptions {
     bool        gui = false;
     bool        trail = true;
     int         bench = 0;          // nombre de frames a chronometrer
+    double      days  = 0.0;        // avance la simulation avant la capture
     int         scaleMode = -1;      // -1 = laisser le defaut
 };
 
@@ -213,6 +214,7 @@ static ShotOptions parseArgs(int argc, char** argv)
         else if (!strcmp(argv[i], "--phi"))   o.phi   = (float)atof(next("0.22"));
         else if (!strcmp(argv[i], "--notrail")) o.trail = false;
         else if (!strcmp(argv[i], "--bench")) { o.enabled = true; o.bench = atoi(next("120")); }
+        else if (!strcmp(argv[i], "--time"))  o.days = atof(next("0"));
         else if (!strcmp(argv[i], "--size"))  { o.w = atoi(next("1280")); o.h = atoi(next("800")); }
         else if (!strcmp(argv[i], "--scale")) {
             std::string m = next("schema");
@@ -271,6 +273,19 @@ int main(int argc, char** argv)
     // ── Mise en place de la capture ──────────────────────────────────
     int    shotFrames = 0;
     double benchStart = 0.0;
+
+    // Avance la simulation avant de capturer (éclipses, configurations…)
+    if (shot.enabled && shot.days > 0.0) {
+        Physics::Integrator warm;
+        double dt = Physics::shortestDynamicalTime(g_sys.bodies, g_sys.frames) / 40.0;
+        long   n  = (long)(shot.days * Constants::DAY_S / dt);
+        for (long i = 0; i < n; ++i) warm.step(g_sys.bodies, g_sys.frames, dt);
+        printf("simulation avancee de %.3f jours (%ld pas)\n", shot.days, n);
+    }
+    // Une capture doit figer la scène : sinon les 3 frames de stabilisation
+    // avancent la simulation de 3 jours (deltaT vaut 1 jour/frame) et
+    // détruisent toute configuration précise, éclipse comprise.
+    if (shot.enabled && shot.bench == 0) g_sim.paused = true;
     if (shot.enabled && !shot.trail) g_sim.showTrail = false;
     if (shot.enabled && !shot.body.empty()) {
         for (int i = 0; i < (int)g_sys.bodies.size(); ++i) {
@@ -353,6 +368,9 @@ int main(int argc, char** argv)
         // ── Capture : quelques frames pour laisser tout se stabiliser ─
         if (shot.enabled) {
             if (++shotFrames >= 3) {
+                printf("corps envoyes au GPU (%d) :", g_renderer.visibleCount());
+                for (auto* b : g_renderer.uploaded()) printf(" %s", b->name.c_str());
+                printf("\n");
                 if (Screenshot::capture(shot.path.c_str(), fbW, fbH))
                     printf("capture ecrite : %s (%dx%d)\n", shot.path.c_str(), fbW, fbH);
                 break;
