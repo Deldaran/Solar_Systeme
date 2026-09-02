@@ -96,7 +96,7 @@ public:
                                    followBodyIndex < (int)bodies.size())
                                 ? bodies[followBodyIndex].name.c_str()
                                 : (freeMode ? "(vol libre)" : "(aucune)");
-            if (ImGui::BeginCombo("Cibler", current)) {
+            if (ImGui::BeginCombo("Cibler (suivre)", current)) {
                 for (int i = 0; i < (int)bodies.size(); ++i) {
                     if (ImGui::Selectable(bodies[i].name.c_str(), followBodyIndex == i)) {
                         // Entre dans le contexte du corps : sa cible devient
@@ -168,7 +168,10 @@ public:
                 ulpOf(absMag), ulpOf(absMag) / ulpOf(locMag));
 
             ImGui::Checkbox("Bascule auto par sphere d'influence", &autoContext);
-            if (ImGui::BeginCombo("Forcer le contexte",
+            ImGui::TextDisabled("Pour VISER un corps, utilisez \"Cibler\" dans");
+            ImGui::TextDisabled("la section Camera. Le reglage ci-dessous ne");
+            ImGui::TextDisabled("change que le repere de calcul (diagnostic).");
+            if (ImGui::BeginCombo("Repere de calcul",
                     fg.valid(cam.frame) ? fg.name(cam.frame).c_str() : "?")) {
                 for (int f = 0; f < fg.size(); ++f) {
                     if (ImGui::Selectable(fg.name(f).c_str(), cam.frame == f)) {
@@ -179,6 +182,11 @@ public:
                         fg.reparent(cam.pos, v, nf, f, bodies);
                         cam.frame  = f;
                         autoContext = false;
+                        // Le pivot suit le repère : sinon la caméra zoome
+                        // vers un point que le corps quitte.
+                        if (cam.mode == Camera::Mode::Orbit &&
+                            fg.frames[f].anchor >= 0)
+                            cam.toOrbit(glm::dvec3(0.0));
                     }
                 }
                 ImGui::EndCombo();

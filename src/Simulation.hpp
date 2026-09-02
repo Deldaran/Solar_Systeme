@@ -15,7 +15,11 @@
 class Simulation {
 public:
     bool   paused        = false;
-    double deltaT        = Constants::DAY_S;   // secondes simulées par frame
+    // 1 jour par image (le défaut d'origine) fait parcourir 2.6e6 km à la
+    // Terre entre deux images, soit trois fois sa sphère d'influence : tout
+    // ce qui n'est pas arrimé à un corps est distancé instantanément.
+    // 0.1 jour laisse une orbite terrestre en ~1 min à 60 images/s.
+    double deltaT        = 0.1 * Constants::DAY_S;  // secondes simulées / frame
     int    stepsPerFrame = 48;                 // sous-étapes Verlet par frame
     bool   showTrail     = true;
 

@@ -81,9 +81,16 @@ static void initScene()
 // ─────────────────────────────────────────────────────────────────────
 static void mouseButtonCB(GLFWwindow*, int btn, int action, int)
 {
-    if (ImGui::GetIO().WantCaptureMouse) return;
-    if (btn == GLFW_MOUSE_BUTTON_LEFT)
-        g_mouseDrag = (action == GLFW_PRESS);
+    if (btn != GLFW_MOUSE_BUTTON_LEFT) return;
+
+    // Le RELÂCHEMENT doit toujours être pris en compte, même au-dessus de
+    // l'interface : sinon un clic commencé dans la vue et terminé sur un
+    // panneau laisse g_mouseDrag à true, et la caméra continue de pivoter
+    // au moindre mouvement de souris, sans bouton enfoncé.
+    if (action == GLFW_RELEASE) { g_mouseDrag = false; return; }
+
+    if (ImGui::GetIO().WantCaptureMouse) return;   // clic destiné à l'UI
+    g_mouseDrag = true;
 }
 
 static void cursorPosCB(GLFWwindow*, double mx, double my)
@@ -322,8 +329,20 @@ int main(int argc, char** argv)
         }
         else if (g_ui.followBodyIndex >= 0 &&
                  g_ui.followBodyIndex < (int)g_sys.bodies.size()) {
-            // Suivre = vivre dans le contexte du corps. La cible reste
-            // exactement (0,0,0) : rien à recalculer, aucune dérive.
+            // Suivre = vivre dans le contexte du corps, cible exactement
+            // (0,0,0). On le RÉAFFIRME à chaque image : forcer un contexte
+            // depuis l'UI, ou basculer de mode, laissait sinon la caméra
+            // tourner autour d'un point figé du repère parent — le corps
+            // s'en éloignait alors régulièrement, et la vue basculait.
+            int want = g_sys.frames.frameAnchoredTo(g_ui.followBodyIndex);
+            if (want >= 0 && (g_camera.frame != want ||
+                              glm::length(g_camera.target) > 1e-9)) {
+                glm::dvec3 v(0.0);
+                int cf = g_camera.frame;
+                g_sys.frames.reparent(g_camera.pos, v, cf, want, g_sys.bodies);
+                g_camera.frame  = cf;          // translation exacte
+                g_camera.target = glm::dvec3(0.0);
+            }
             clampZoom();
             g_camera.updateFromOrbit();
         }
@@ -340,6 +359,15 @@ int main(int argc, char** argv)
                                       g_camera.frame, nf, g_sys.bodies);
                 g_sys.frames.reparent(g_camera.pos, v, cf, nf, g_sys.bodies);
                 g_camera.frame = nf;
+
+                // Le pivot suit le contexte. Sans ça, la caméra continue de
+                // tourner et de zoomer vers un point FIXE pendant que le
+                // corps s'en éloigne : le zoom ne va pas là où on regarde,
+                // et l'écart se creuse. toOrbit() recale le pivot sur le
+                // corps SANS déplacer la caméra.
+                if (g_camera.mode == Camera::Mode::Orbit &&
+                    g_sys.frames.frames[nf].anchor >= 0)
+                    g_camera.toOrbit(glm::dvec3(0.0));
             }
         }
 
