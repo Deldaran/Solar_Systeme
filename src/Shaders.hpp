@@ -40,6 +40,43 @@ void main() {
 }
 )GLSL";
 
+
+static const char* CUBE = R"GLSL(
+// ── Correspondance direction <-> (face, uv) d'un cube ───────────────────
+// On stocke les surfaces sur les 6 faces d'un cube plutôt que sur une
+// carte équirectangulaire : densité de texels uniforme, et surtout aucune
+// singularité aux pôles — une équirectangulaire y écrase toute une ligne
+// de texels sur un point.
+vec3 dirFromFace(int face, vec2 uv) {
+    vec2 t = uv * 2.0 - 1.0;
+    if (face == 0) return normalize(vec3( 1.0, -t.y, -t.x));
+    if (face == 1) return normalize(vec3(-1.0, -t.y,  t.x));
+    if (face == 2) return normalize(vec3( t.x,  1.0,  t.y));
+    if (face == 3) return normalize(vec3( t.x, -1.0, -t.y));
+    if (face == 4) return normalize(vec3( t.x, -t.y,  1.0));
+    return             normalize(vec3(-t.x, -t.y, -1.0));
+}
+
+void faceFromDir(vec3 d, out float face, out vec2 uv) {
+    vec3  a = abs(d);
+    float ma; vec2 st;
+    if (a.x >= a.y && a.x >= a.z) {
+        ma = a.x;
+        if (d.x > 0.0) { face = 0.0; st = vec2(-d.z, -d.y); }
+        else           { face = 1.0; st = vec2( d.z, -d.y); }
+    } else if (a.y >= a.z) {
+        ma = a.y;
+        if (d.y > 0.0) { face = 2.0; st = vec2(d.x,  d.z); }
+        else           { face = 3.0; st = vec2(d.x, -d.z); }
+    } else {
+        ma = a.z;
+        if (d.z > 0.0) { face = 4.0; st = vec2( d.x, -d.y); }
+        else           { face = 5.0; st = vec2(-d.x, -d.y); }
+    }
+    uv = st / max(ma, 1e-9) * 0.5 + 0.5;
+}
+)GLSL";
+
 static const char* FS_HEAD = R"GLSL(
 #version 330 core
 
@@ -53,6 +90,7 @@ struct SphereBody {
     float emissive;   // 1 = étoile, 0 = planète
     float surfType;   // 0 tellurique, 1 désertique, 2 glacée, 3 gazeuse
     float surfSeed;   // graine de variation
+    float slot;       // emplacement dans le cache de surfaces (-1 = aucun)
 };
 
 uniform int        uBodyCount;
@@ -61,12 +99,28 @@ uniform float      uExposure;
 uniform float      uHalfH;
 uniform float      uScreenH;    // hauteur du framebuffer, en pixels
 
-// Intersection analytique rayon/sphère (rd normalisé)
+// ── Cache de surfaces ────────────────────────────────────────────────────
+// 6 faces de cube par corps, empilées dans un tableau de textures 2D.
+// Remplace ~400 évaluations de hachage par fragment par une lecture.
+uniform sampler2DArray uCache;
+uniform float          uUseCache;
+
+// Intersection analytique rayon/sphère (rd normalisé).
+//
+// La forme scolaire calcule h = b*b - (dot(oc,oc) - ra*ra). Pour un corps
+// à 10^9 km, ces deux termes valent ~10^18 alors que ra*ra ne vaut que
+// ~10^9 : en float32 leur ulp est de 10^11, et la soustraction ne rend que
+// du bruit. Le test d'intersection devient alors aléatoire — d'où des
+// bandes d'ombre parasites sur les planètes.
+//
+// On passe par la composante PERPENDICULAIRE : oc = b*rd + d avec d ⊥ rd,
+// donc |oc|² = b² + |d|² et h = ra² - |d|². Les deux termes restent
+// petits, et plus aucune grande quantité ne s'annule.
 bool raySphere(vec3 ro, vec3 rd, vec3 ce, float ra, out float tNear, out float tFar) {
     vec3  oc = ro - ce;
     float b  = dot(oc, rd);
-    float c  = dot(oc, oc) - ra * ra;
-    float h  = b * b - c;
+    vec3  d  = oc - b * rd;
+    float h  = ra * ra - dot(d, d);
     if (h < 0.0) return false;
     h     = sqrt(h);
     tNear = -b - h;
@@ -136,9 +190,11 @@ float hardShadow(vec3 ro, vec3 lightPos, int selfId) {
 vec3 bumpNormal(vec3 N, float seed, int type, int oct) {
     if (type == 3) return N;
 
-    int   o   = max(3, oct - 2);
+    // 3 evaluations de fBm : on plafonne les octaves, le relief fin est
+    // de toute façon la seule composante visible en gros plan.
+    int   o   = clamp(oct - 2, 3, 6);
     float eps = 0.010;
-    vec3  p   = N * 2.6 + vec3(seed * 13.7);
+    vec3  p   = N * 2.6 + seedOffset(seed);
 
     // Base tangente stable (évite la singularité au pôle)
     vec3 up = (abs(N.y) < 0.99) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
@@ -165,8 +221,31 @@ vec3 shadePlanet(vec3 hitPt, vec3 N, int id, int oct) {
 
     int   type = int(uBodies[id].surfType);
     float gloss;
-    vec3  albedo = surfaceColor(type, uBodies[id].surfSeed,
-                                uBodies[id].color, N, oct, gloss);
+    vec3  albedo;
+
+    if (uUseCache > 0.5 && uBodies[id].slot >= 0.0) {
+        // Lecture du cache : toute la structure basse et moyenne fréquence
+        // est précalculée. Une seule lecture de texture au lieu du bruit.
+        float face; vec2 uv;
+        faceFromDir(N, face, uv);
+        vec4 s = texture(uCache, vec3(uv, uBodies[id].slot * 6.0 + face));
+        albedo = s.rgb;
+        gloss  = s.a;
+
+        // Détail fin AJOUTÉ seulement quand le corps est gros à l'écran.
+        // Ces fréquences sont au-dessus de ce que la carte peut résoudre :
+        // il n'y a donc pas de double comptage.
+        // Détail fin AJOUTÉ uniquement quand le corps est gros à l'écran,
+        // et sur des fréquences que la carte ne résout pas — sinon on
+        // recompte ce qu'elle contient déjà, et on alias par-dessus.
+        if (oct >= 9) {
+            float d = fbm(N * 160.0 + seedOffset(uBodies[id].surfSeed), 2);
+            albedo *= 1.0 + d * 0.10;
+        }
+    } else {
+        albedo = surfaceColor(type, uBodies[id].surfSeed,
+                              uBodies[id].color, N, oct, gloss);
+    }
     if (!hasLight) return albedo * 0.05;
 
     // Relief : la normale de l'éclairage est perturbée, pas la géométrie.
@@ -207,7 +286,7 @@ vec3 shadeStar(vec3 hitPt, vec3 N, vec3 baseColor, float seed, int oct) {
     // Assombrissement centre-bord d'Eddington : I(mu)/I(0) = 0.4 + 0.6 mu
     float limb = 0.4 + 0.6 * mu;
 
-    vec3 p = N * 9.0 + vec3(seed * 17.3);
+    vec3 p = N * 9.0 + seedOffset(seed);
 
     // Granulation convective : Worley donne de vraies cellules jointives,
     // ce que la structure réelle de la photosphère est. Contraste faible.
@@ -301,8 +380,48 @@ void main() {
 
 // Montage final du fragment shader des corps.
 inline std::string fragmentSource() {
-    return std::string(FS_HEAD) + NOISE + SURFACE + FS_BODY;
+    return std::string(FS_HEAD) + NOISE + CUBE + SURFACE + FS_BODY;
 }
+
+// ════════════════════════════════════════════════════════════════════════
+//  CUISSON DU CACHE DE SURFACES
+// ════════════════════════════════════════════════════════════════════════
+static const char* BAKE_VS = R"GLSL(
+#version 330 core
+layout(location=0) in vec2 aPos;
+out vec2 vUV;
+void main() {
+    vUV = aPos * 0.5 + 0.5;
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+)GLSL";
+
+static const char* BAKE_HEAD = R"GLSL(
+#version 330 core
+in  vec2 vUV;
+out vec4 fragColor;
+
+uniform int   uFace;
+uniform float uSurfType;
+uniform float uSurfSeed;
+uniform vec3  uTint;
+uniform int   uOctaves;
+)GLSL";
+
+static const char* BAKE_MAIN = R"GLSL(
+void main() {
+    vec3  n = dirFromFace(uFace, vUV);
+    float gloss;
+    vec3  c = surfaceColor(int(uSurfType), uSurfSeed, uTint, n, uOctaves, gloss);
+    // RGB = albedo, A = brillance du matériau (eau, glace)
+    fragColor = vec4(c, gloss);
+}
+)GLSL";
+
+inline std::string bakeFragmentSource() {
+    return std::string(BAKE_HEAD) + NOISE + CUBE + SURFACE + BAKE_MAIN;
+}
+
 
 // ════════════════════════════════════════════════════════════════════════
 //  PASSE 2 — TRAIL D'ORBITE
@@ -346,17 +465,19 @@ struct SphereBody {
     float emissive;
     float surfType;
     float surfSeed;
+    float slot;
 };
 
 uniform int        uBodyCount;
 uniform SphereBody uBodies[32];
 uniform vec3       uTrailColor;
 
+// Forme stable : voir la note du shader principal.
 bool raySphere(vec3 ro, vec3 rd, vec3 ce, float ra, out float tNear, out float tFar) {
     vec3  oc = ro - ce;
     float b  = dot(oc, rd);
-    float c  = dot(oc, oc) - ra * ra;
-    float h  = b * b - c;
+    vec3  d  = oc - b * rd;
+    float h  = ra * ra - dot(d, d);
     if (h < 0.0) return false;
     h     = sqrt(h);
     tNear = -b - h;

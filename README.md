@@ -162,15 +162,41 @@ lisse et strié de canyons ténus.
   luminance d'ordre 1, elle ressemble à un caillou beige ; il faut émettre
   très au-dessus de 1 pour que le tone mapping la sature en blanc.
 
-### Coût
+## Optimisation : le cache de surfaces
 
-Le nombre d'octaves est indexé sur la taille apparente du corps à l'écran
-(une octave de plus par doublement) — première brique du LOD.
+Évaluer le bruit par fragment coûte ~400 hachages en gros plan. Se poser au
+sol, où la planète occupe tout l'écran, serait injouable. Les surfaces sont
+donc **cuites une fois dans une texture**, puis simplement lues.
 
-| Scène, 2880 × 1800 | |
+### Six faces de cube, pas une carte équirectangulaire
+
+Une carte lat/lon a deux défauts rédhibitoires : elle écrase toute une ligne
+de texels sur chaque pôle, et elle a une couture en longitude. Les six faces
+d'un cube ont une densité de texels quasi uniforme et aucune singularité.
+Elles tiennent dans **un seul** tableau de textures 2D — donc un seul
+échantillonneur pour tous les corps, ce qui compte : GLSL 3.3 ne garantit
+que 16 unités de texture.
+
+### Octaves accordées à la résolution
+
+Cuire plus d'octaves que la carte ne peut en résoudre revient à
+échantillonner au-dessus de sa fréquence de Nyquist : la texture sort
+aliasée. Une face de 2^k texels porte au plus k−2 octaves. Les fréquences
+plus fines restent calculées à la volée, mais seulement quand le corps est
+gros à l'écran, et sur deux octaves.
+
+| Gros plan planète, 2880 × 1800 | |
 |---|---|
-| vue système | 1,8 ms — 553 FPS |
-| gros plan planète (10 octaves + Worley) | 29,6 ms — 34 FPS |
+| bruit procédural par fragment | 27,4 ms — 36 FPS |
+| **cache de surfaces** | **8,4 ms — 118 FPS** |
+| vue système | 1,9 ms — 515 FPS |
+
+Les deux chemins donnent la même image (luminance moyenne du disque : 39,4
+contre 39,4). `--nocache` permet de comparer, et la case du panneau Debug
+bascule à chaud.
+
+Limite connue : de fines coutures restent visibles aux arêtes du cube, le
+filtrage linéaire n'ayant pas de texels au-delà du bord d'une face.
 
 ## Captures
 

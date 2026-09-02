@@ -71,6 +71,9 @@ static void initScene()
 
     g_ui.followBodyIndex = -1;
     g_ui.setInitialBodies(g_sys.bodies, g_sys.frames);
+
+    // Cuisson des surfaces : une fois pour toutes, pas par image.
+    g_renderer.bakeSurfaces(g_sys.bodies);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -194,6 +197,7 @@ struct ShotOptions {
     int         w = 1280, h = 800;
     bool        gui = false;
     bool        trail = true;
+    bool        cache = true;
     int         bench = 0;          // nombre de frames a chronometrer
     double      days  = 0.0;        // avance la simulation avant la capture
     int         scaleMode = -1;      // -1 = laisser le defaut
@@ -213,6 +217,7 @@ static ShotOptions parseArgs(int argc, char** argv)
         else if (!strcmp(argv[i], "--theta")) o.theta = (float)atof(next("-2.1"));
         else if (!strcmp(argv[i], "--phi"))   o.phi   = (float)atof(next("0.22"));
         else if (!strcmp(argv[i], "--notrail")) o.trail = false;
+        else if (!strcmp(argv[i], "--nocache")) o.cache = false;
         else if (!strcmp(argv[i], "--bench")) { o.enabled = true; o.bench = atoi(next("120")); }
         else if (!strcmp(argv[i], "--time"))  o.days = atof(next("0"));
         else if (!strcmp(argv[i], "--size"))  { o.w = atoi(next("1280")); o.h = atoi(next("800")); }
@@ -267,6 +272,8 @@ int main(int argc, char** argv)
     ImGui_ImplOpenGL3_Init("#version 330 core");
 
     g_renderer.init();
+    g_ui.useCache = shot.cache;
+    g_renderer.setUseCache(shot.cache);
     if (shot.scaleMode >= 0) g_ui.scaleMode = (VisualScale::Mode)shot.scaleMode;
     initScene();
 
@@ -386,9 +393,20 @@ int main(int argc, char** argv)
         auto nearInfo = Navigation::nearestBody(g_camera, g_sys.bodies, g_sys.frames);
 
         // DisplaySize est en points logiques — sur Retina fbH vaut le double.
+        char cinfo[128];
+        const auto& cch = g_renderer.cache();
+        snprintf(cinfo, sizeof cinfo, "%d faces de %d px, %d octaves, %.0f Mo",
+                 cch.layers(), cch.faceSize(), cch.octaves(),
+                 cch.bytes() / (1024.0 * 1024.0));
+
         bool camDirty = g_ui.draw(g_camera, g_sys.bodies, g_sys.frames, g_sim,
                                   io.Framerate, io.DisplaySize.y,
-                                  g_renderer.visibleCount(), nearInfo);
+                                  g_renderer.visibleCount(), nearInfo, cinfo);
+        g_renderer.setUseCache(g_ui.useCache);
+        if (g_ui.surfaceDirty) {
+            g_renderer.bakeSurfaces(g_sys.bodies);   // recuisson a la demande
+            g_ui.surfaceDirty = false;
+        }
         if (g_ui.scaleDirty) { applyVisualScale(); g_ui.scaleDirty = false; camDirty = true; }
         if (camDirty) {
             if (g_camera.mode == Camera::Mode::Orbit) { clampZoom(); g_camera.updateFromOrbit(); }

@@ -32,11 +32,14 @@ public:
     VisualScale::Mode scaleMode  = VisualScale::Mode::Schematique;
     float             scaleK     = VisualScale::K_DEFAULT;
     bool              scaleDirty = false;   // main recalcule et remet à false
+    bool              surfaceDirty = false; // main recuit le cache et remet à false
+    bool              useCache     = true;
 
     // Retourne true si la caméra doit être rafraîchie
     bool draw(Camera& cam, std::vector<Body>& bodies, const FrameGraph& fg,
               Simulation& sim, float fps, float screenH, int drawnBodies,
-              const Navigation::Nearest& nearInfo)
+              const Navigation::Nearest& nearInfo,
+              const std::string& cacheInfo)
     {
         bool camDirty = false;
         const bool freeMode = (cam.mode == Camera::Mode::Free);
@@ -241,15 +244,19 @@ public:
                     // ── Surface procédurale ────────────────────────
                     if (b.emissive < 0.5f) {
                         int st = b.surfaceType;
-                        if (ImGui::Combo("Categorie", &st, Surface::names(), Surface::COUNT))
-                            b.surfaceType = st;
-                        ImGui::SliderFloat("Graine", &b.surfaceSeed, 0.f, 1000.f, "%.2f");
+                        if (ImGui::Combo("Categorie", &st, Surface::names(), Surface::COUNT)) {
+                            b.surfaceType = st; surfaceDirty = true;
+                        }
+                        if (ImGui::SliderFloat("Graine", &b.surfaceSeed, 0.f, 1000.f, "%.2f"))
+                            surfaceDirty = true;
                         ImGui::SameLine();
-                        if (ImGui::SmallButton("Tirer"))
+                        if (ImGui::SmallButton("Tirer")) {
                             b.surfaceSeed = float((m_rng = m_rng * 1103515245u + 12345u)
                                                   % 100000u) * 0.01f;
+                            surfaceDirty = true;
+                        }
                     }
-                    ImGui::ColorEdit3("Teinte", &b.color.x);
+                    if (ImGui::ColorEdit3("Teinte", &b.color.x)) surfaceDirty = true;
                     ImGui::TextDisabled("La palette est derivee sur le GPU de");
                     ImGui::TextDisabled("(categorie, graine, teinte).");
                     if (ImGui::Button("Cibler")) {
@@ -281,6 +288,10 @@ public:
         // ══ Debug ════════════════════════════════════════════════════
         if (ImGui::CollapsingHeader("Debug technique")) {
             ImGui::Text("Corps envoyes au GPU : %d / %d", drawnBodies, (int)bodies.size());
+            ImGui::TextDisabled("(inclut les occulteurs hors champ)");
+            if (ImGui::Checkbox("Cache de surfaces", &useCache)) { /* main applique */ }
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", cacheInfo.c_str());
             glm::dvec3 bc = Physics::barycenter(bodies, fg);
             ImGui::Text("Barycentre : %.4e km", glm::length(bc));
             ImGui::Separator();

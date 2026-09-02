@@ -18,6 +18,7 @@
 #include "Frustum.hpp"
 #include "Occlusion.hpp"
 #include "Shaders.hpp"
+#include "SurfaceCache.hpp"
 #include "Constants.hpp"
 
 #include <glm/gtc/type_ptr.hpp>
@@ -30,9 +31,16 @@
 
 class Renderer {
 public:
+    // Cuit le cache de surfaces. À rappeler si catégorie/graine/teinte change.
+    void bakeSurfaces(const std::vector<Body>& bodies) { m_cache.bake(bodies); }
+    void setUseCache(bool on) { m_useCache = on; }
+    bool useCache() const     { return m_useCache; }
+    const SurfaceCache& cache() const { return m_cache; }
+
     void init() {
         buildQuad();
         buildTrailBuffer();
+        m_cache.init(256);
 
         const std::string fs = Shaders::fragmentSource();
         m_prog = buildProgram(Shaders::VS, fs.c_str());
@@ -43,6 +51,8 @@ public:
         m_uCount    = glGetUniformLocation(m_prog, "uBodyCount");
         m_uExposure = glGetUniformLocation(m_prog, "uExposure");
         m_uScreenH  = glGetUniformLocation(m_prog, "uScreenH");
+        m_uCache    = glGetUniformLocation(m_prog, "uCache");
+        m_uUseCache = glGetUniformLocation(m_prog, "uUseCache");
 
         m_trailProg = buildProgram(Shaders::TRAIL_VS, Shaders::TRAIL_FS);
         cacheBodyLocations(m_trailProg, m_tloc);
@@ -103,11 +113,15 @@ public:
 
         m_visible.clear();
         m_relPos.clear();
+        m_slot.clear();
         for (size_t i = 0; i < bodies.size(); ++i) {
             if (!m_keep[i]) continue;
             if ((int)m_visible.size() >= Constants::MAX_BODIES) break;
             m_visible.push_back(&bodies[i]);
             m_relPos.push_back(glm::vec3(m_rel[i]));  // cast float ICI, et ici seulement
+            // Le cache est indexé par la position dans le tableau COMPLET,
+            // pas dans la liste transmise, qui varie d'une image à l'autre.
+            m_slot.push_back(m_cache.ready() ? (int)i : -1);
         }
         m_count = (int)m_visible.size();
 
@@ -122,6 +136,11 @@ public:
         glUniform1f(m_uHalfW, m_halfW);
         glUniform1f(m_uHalfH, m_halfH);
         glUniform1f(m_uScreenH, float(fbH));      // pilote le LOD d'octaves
+
+        // Cache de surfaces sur l'unité 0
+        m_cache.bind(0);
+        glUniform1i(m_uCache, 0);
+        glUniform1f(m_uUseCache, (m_cache.ready() && m_useCache) ? 1.f : 0.f);
 
         glm::mat4 invRot = cam.invRotationMatrix();
         glUniformMatrix4fv(m_uInvRot, 1, GL_FALSE, glm::value_ptr(invRot));
@@ -196,13 +215,14 @@ public:
         glDeleteBuffers(1, &m_trailVbo);
         glDeleteProgram(m_prog);
         glDeleteProgram(m_trailProg);
+        m_cache.cleanup();
     }
 
     // Doit rester >= Simulation::TRAIL_MAX
     static constexpr int TRAIL_CAPACITY = 4000;
 
 private:
-    struct BodyLoc { GLint posRel, radius, color, emissive, surfType, surfSeed; };
+    struct BodyLoc { GLint posRel, radius, color, emissive, surfType, surfSeed, slot; };
 
     GLuint m_vao = 0, m_vbo = 0, m_prog = 0;
     GLuint m_trailVao = 0, m_trailVbo = 0, m_trailProg = 0;
@@ -210,7 +230,7 @@ private:
     BodyLoc m_loc[Constants::MAX_BODIES];
     BodyLoc m_tloc[Constants::MAX_BODIES];
     GLint m_uInvRot = -1, m_uHalfW = -1, m_uHalfH = -1, m_uCount = -1,
-          m_uExposure = -1, m_uScreenH = -1;
+          m_uExposure = -1, m_uScreenH = -1, m_uCache = -1, m_uUseCache = -1;
     GLint m_tRot = -1, m_tHalfW = -1, m_tHalfH = -1, m_tCount = -1,
           m_tBodyCount = -1, m_tTrailColor = -1;
 
@@ -219,10 +239,13 @@ private:
     std::vector<char>        m_keep;
     std::vector<const Body*> m_visible;
     std::vector<glm::vec3>   m_relPos;
+    std::vector<int>         m_slot;
+    SurfaceCache             m_cache;
     std::vector<float>       m_trailVerts;
     int    m_count  = 0;
     double m_aspect = 1.0;
     float  m_halfW  = 1.f, m_halfH = 1.f;
+    bool   m_useCache = true;
 
     static void cacheBodyLocations(GLuint prog, BodyLoc* out) {
         char buf[64];
@@ -239,6 +262,8 @@ private:
             out[i].surfType = glGetUniformLocation(prog, buf);
             snprintf(buf, sizeof buf, "uBodies[%d].surfSeed", i);
             out[i].surfSeed = glGetUniformLocation(prog, buf);
+            snprintf(buf, sizeof buf, "uBodies[%d].slot", i);
+            out[i].slot = glGetUniformLocation(prog, buf);
         }
     }
 
@@ -251,6 +276,7 @@ private:
             glUniform1f (loc[i].emissive, b.emissive);
             glUniform1f (loc[i].surfType, float(b.surfaceType));
             glUniform1f (loc[i].surfSeed, b.surfaceSeed);
+            glUniform1f (loc[i].slot, float(m_slot[i]));
         }
     }
 

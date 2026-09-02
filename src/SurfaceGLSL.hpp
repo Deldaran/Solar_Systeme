@@ -35,6 +35,16 @@ float geneR(float seed, float k, float lo, float hi) {
     return mix(lo, hi, gene(seed, k));
 }
 
+// ── Décalage de domaine, BORNÉ ──────────────────────────────────────────
+// Décaler le domaine par « seed * 219.3 » porte les coordonnées à ~2e5 ;
+// après dix octaves (x553) on est à 1e8, où l'ulp du float32 vaut 8 pour
+// une maille de bruit de 1. Les octaves fines sont alors quantifiées en
+// marches, ce qui produit à l'écran de larges anneaux concentriques.
+// Le décalage doit rester petit : il ne sert qu'à décorréler les mondes.
+vec3 seedOffset(float seed) {
+    return vec3(gene(seed, 41.0), gene(seed, 42.0), gene(seed, 43.0)) * 16.0;
+}
+
 // ════════════════════════════════════════════════════════════════════════
 //  0 — TELLURIQUE HABITABLE : océans, continents, biomes, calottes
 // ════════════════════════════════════════════════════════════════════════
@@ -50,7 +60,7 @@ vec3 surfTerrestrial(vec3 n, float seed, vec3 tint, int oct, out float gloss)
     float gLush    = geneR(seed,  7.0, 0.0,  1.0);  // luxuriance
     float gHue     = geneR(seed,  8.0, -0.55, 0.55);
 
-    vec3 p = n * gScale + vec3(seed * 137.13, seed * 71.7, seed * 219.3);
+    vec3 p = n * gScale + seedOffset(seed);
 
     // Continents : fBm déformé -> côtes découpées, pas des taches rondes
     vec3  q = warp(p, gWarp, max(3, oct - 3));
@@ -126,7 +136,7 @@ vec3 surfDesert(vec3 n, float seed, vec3 tint, int oct, out float gloss)
     float gHue    = geneR(seed,  8.0, -0.30, 0.30);
     float gOxide  = geneR(seed,  9.0, 0.2, 1.0);
 
-    vec3 p = n * gScale + vec3(seed * 91.7, seed * 233.1, seed * 47.9);
+    vec3 p = n * gScale + seedOffset(seed);
 
     // Grandes structures : hauts plateaux clairs / bassins d'impact sombres
     float region = fbm(warp(p, 0.45, 3), oct) * 0.5 + 0.5;
@@ -188,7 +198,7 @@ vec3 surfIcy(vec3 n, float seed, vec3 tint, int oct, out float gloss)
     float gCrater = geneR(seed, 5.0, 0.0, 0.7);
     float gHue    = geneR(seed, 6.0, -0.4, 0.4);
 
-    vec3 p = n * gScale + vec3(seed * 53.3, seed * 167.1, seed * 89.7);
+    vec3 p = n * gScale + seedOffset(seed);
 
     // Fractures fines à la Europe : ridged pour les linéaments, Worley
     // F2-F1 pour les joints de plaques.
@@ -230,7 +240,7 @@ vec3 surfGasGiant(vec3 n, float seed, vec3 tint, int oct, out float gloss)
     float gHue    = geneR(seed, 6.0, -0.35, 0.35);
     float gPole   = geneR(seed, 7.0,  0.55, 0.95); // assombrissement polaire
 
-    vec3 p = n * 2.0 + vec3(seed * 311.7, 0.0, seed * 129.1);
+    vec3 p = n * 2.0 + seedOffset(seed);
 
     // On écrase fortement l'axe Y : le bruit s'étire alors en bandes
     // horizontales, comme un écoulement zonal réel.
@@ -238,7 +248,7 @@ vec3 surfGasGiant(vec3 n, float seed, vec3 tint, int oct, out float gloss)
     float turb = fbm(fp * 1.6, oct) * 0.5 + 0.5;
 
     float lat  = n.y;
-    float band = sin(lat * gBands + turb * 5.0 + seed * 6.3) * 0.5 + 0.5;
+    float band = sin(lat * gBands + turb * 5.0 + gene(seed, 44.0) * 6.28) * 0.5 + 0.5;
     band = smoothstep(0.5 - gContr * 0.5, 0.5 + gContr * 0.5, band);
 
     float L    = max(luminance(tint), 0.08);

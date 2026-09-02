@@ -56,6 +56,23 @@ typedef std::ptrdiff_t GLsizeiptr;
 #define GL_RGBA                           0x1908
 #define GL_UNSIGNED_BYTE                  0x1401
 #define GL_PACK_ALIGNMENT                 0x0D05
+#define GL_TEXTURE_2D                     0x0DE1
+#define GL_TEXTURE_2D_ARRAY               0x8C1A
+#define GL_TEXTURE0                       0x84C0
+#define GL_TEXTURE_MAG_FILTER             0x2800
+#define GL_TEXTURE_MIN_FILTER             0x2801
+#define GL_TEXTURE_WRAP_S                 0x2802
+#define GL_TEXTURE_WRAP_T                 0x2803
+#define GL_TEXTURE_WRAP_R                 0x8072
+#define GL_TEXTURE_BASE_LEVEL             0x813C
+#define GL_TEXTURE_MAX_LEVEL              0x813D
+#define GL_LINEAR                         0x2601
+#define GL_LINEAR_MIPMAP_LINEAR           0x2703
+#define GL_CLAMP_TO_EDGE                  0x812F
+#define GL_RGBA8                          0x8058
+#define GL_FRAMEBUFFER                    0x8D40
+#define GL_COLOR_ATTACHMENT0              0x8CE0
+#define GL_FRAMEBUFFER_COMPLETE           0x8CD5
 #define GL_ARRAY_BUFFER                   0x8892
 #define GL_STATIC_DRAW                    0x88E4
 #define GL_DYNAMIC_DRAW                   0x88E8
@@ -75,6 +92,18 @@ typedef std::ptrdiff_t GLsizeiptr;
   X(void,   DrawArrays,            (GLenum,GLint,GLsizei))                     \
   X(void,   ReadPixels,            (GLint,GLint,GLsizei,GLsizei,GLenum,GLenum,void*)) \
   X(void,   PixelStorei,           (GLenum,GLint))                             \
+  X(void,   GenTextures,           (GLsizei,GLuint*))                           \
+  X(void,   BindTexture,           (GLenum,GLuint))                             \
+  X(void,   DeleteTextures,        (GLsizei,const GLuint*))                     \
+  X(void,   ActiveTexture,         (GLenum))                                    \
+  X(void,   TexParameteri,         (GLenum,GLenum,GLint))                       \
+  X(void,   TexImage3D,            (GLenum,GLint,GLint,GLsizei,GLsizei,GLsizei,GLint,GLenum,GLenum,const void*)) \
+  X(void,   GenerateMipmap,        (GLenum))                                    \
+  X(void,   GenFramebuffers,       (GLsizei,GLuint*))                           \
+  X(void,   BindFramebuffer,       (GLenum,GLuint))                             \
+  X(void,   DeleteFramebuffers,    (GLsizei,const GLuint*))                     \
+  X(void,   FramebufferTextureLayer,(GLenum,GLenum,GLuint,GLint,GLint))         \
+  X(GLenum, CheckFramebufferStatus,(GLenum))                                    \
   X(GLuint, CreateShader,          (GLenum))                                   \
   X(void,   ShaderSource,          (GLuint,GLsizei,const GLchar* const*,const GLint*)) \
   X(void,   CompileShader,         (GLuint))                                   \
