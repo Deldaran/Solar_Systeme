@@ -1,16 +1,19 @@
 #pragma once
 
 // ════════════════════════════════════════════════════════════════════════
-//  Shaders.hpp — Sources GLSL (SOLID: SRP)
+//  Shaders.hpp — Assemblage des sources GLSL (SOLID: SRP)
 //
-//  1) Passe « corps »  : ray casting analytique plein écran
-//     - Caméra à l'origine (posRel = pos_monde - pos_caméra, en float)
-//     - Fond étoilé procédural, Phong + ombres portées, limbe atmosphérique
-//     - Assombrissement centre-bord solaire + couronne
-//  2) Passe « trail »  : ligne d'orbite, occultée analytiquement par les
-//     corps (le ray caster n'écrit pas de depth buffer, donc on teste
-//     l'occlusion à la main — cohérent et exact).
+//  Le fragment shader des corps est monté à partir de trois briques :
+//     FS_HEAD    déclarations, uniformes, intersection rayon/sphère
+//     NOISE      bibliothèque de bruit          (NoiseGLSL.hpp)
+//     SURFACE    les quatre catégories de monde (SurfaceGLSL.hpp)
+//     FS_BODY    éclairage, ombres, main()
+//  Chaque brique reste lisible et testable séparément.
 // ════════════════════════════════════════════════════════════════════════
+
+#include "NoiseGLSL.hpp"
+#include "SurfaceGLSL.hpp"
+#include <string>
 
 namespace Shaders {
 
@@ -19,15 +22,14 @@ namespace Shaders {
 // ════════════════════════════════════════════════════════════════════════
 
 // Reconstruit la direction du rayon en espace monde à partir de la matrice
-// de ROTATION PURE (sans translation — la translation est absorbée dans
-// posRel côté CPU, en double).
+// de ROTATION PURE (la translation est absorbée côté CPU, en double).
 static const char* VS = R"GLSL(
 #version 330 core
 layout(location=0) in vec2 aPos;
 
-uniform mat4  uInvRot;  // rotation inverse caméra (float, sans translation)
-uniform float uHalfW;   // demi-largeur frustum (tan(fov/2) * aspect)
-uniform float uHalfH;   // demi-hauteur frustum (tan(fov/2))
+uniform mat4  uInvRot;
+uniform float uHalfW;
+uniform float uHalfH;
 
 out vec3 vRayDir;
 
@@ -38,46 +40,26 @@ void main() {
 }
 )GLSL";
 
-static const char* FS = R"GLSL(
+static const char* FS_HEAD = R"GLSL(
 #version 330 core
 
 in  vec3 vRayDir;
 out vec4 fragColor;
 
-// ── Structure corps (positions relatives à la caméra) ────────────────────
 struct SphereBody {
-    vec3  posRel;    // position relative à la caméra (km, float)
-    float radius;    // rayon visuel (km)
-    vec3  color;
-    float emissive;  // 1 = étoile, 0 = planète
+    vec3  posRel;     // position relative à la caméra (km, float)
+    float radius;     // rayon visuel (km)
+    vec3  color;      // teinte identitaire du corps
+    float emissive;   // 1 = étoile, 0 = planète
+    float surfType;   // 0 tellurique, 1 désertique, 2 glacée, 3 gazeuse
+    float surfSeed;   // graine de variation
 };
 
 uniform int        uBodyCount;
 uniform SphereBody uBodies[32];
 uniform float      uExposure;
-
-// ── Utilitaires ───────────────────────────────────────────────────────────
-float hash(vec3 p) {
-    p = fract(p * vec3(443.8975, 397.2973, 491.1871));
-    p += dot(p, p.yzx + 19.19);
-    return fract((p.x + p.y) * p.z);
-}
-
-// Fond étoilé procédural 3 couches
-vec3 starField(vec3 dir) {
-    vec3 col = vec3(0.01, 0.02, 0.06);
-    for (int i = 0; i < 3; i++) {
-        float  scale = 80.0 + float(i) * 120.0;
-        vec3   q     = floor(dir * scale);
-        float  h     = hash(q);
-        if (h > 0.997) {
-            float bright = (h - 0.997) / 0.003;
-            vec3  sc     = mix(vec3(0.9,0.95,1.0), vec3(1.0,0.9,0.7), hash(q * 7.3));
-            col += sc * bright * 1.5;
-        }
-    }
-    return col;
-}
+uniform float      uHalfH;
+uniform float      uScreenH;    // hauteur du framebuffer, en pixels
 
 // Intersection analytique rayon/sphère (rd normalisé)
 bool raySphere(vec3 ro, vec3 rd, vec3 ce, float ra, out float tNear, out float tFar) {
@@ -91,8 +73,47 @@ bool raySphere(vec3 ro, vec3 rd, vec3 ce, float ra, out float tNear, out float t
     tFar  = -b + h;
     return tFar > 0.001;
 }
+)GLSL";
 
-// Shadow ray : 0 si occulté, 1 sinon
+static const char* FS_BODY = R"GLSL(
+// ── Niveau de détail ────────────────────────────────────────────────────
+// Le coût du bruit est linéaire en nombre d'octaves, et une octave plus
+// fine que le pixel ne fait qu'ajouter du scintillement. On indexe donc
+// le nombre d'octaves sur la taille apparente du corps à l'écran : une
+// octave de plus à chaque doublement. C'est la première brique du LOD.
+int octavesFor(float radius, float dist) {
+    float px = (radius / max(dist, 1e-6)) / (2.0 * uHalfH) * uScreenH;
+    return clamp(int(log2(max(px, 2.0))) + 1, 3, 10);
+}
+
+// Fond étoilé procédural, 3 couches.
+// Chaque cellule de la grille peut contenir UNE étoile, placée à une
+// position aléatoire dans la cellule et rendue comme un point rond. La
+// version naïve — colorer la cellule entière — donnait des carrés.
+vec3 starField(vec3 dir) {
+    vec3 col = vec3(0.008, 0.014, 0.042);
+    for (int i = 0; i < 3; i++) {
+        float scale = 140.0 + float(i) * 210.0;
+        vec3  p     = dir * scale;
+        vec3  cell  = floor(p);
+        vec3  f     = p - cell;
+
+        vec3 h = hash33(cell) * 0.5 + 0.5;          // [0,1]
+        if (h.z > 0.982) {
+            vec3  centre = vec3(h.x, h.y, hash33(cell * 1.7).x * 0.5 + 0.5);
+            float d      = length(f - centre);
+            float bright = (h.z - 0.982) / 0.018;
+            float dot_   = smoothstep(0.085, 0.0, d);      // point rond
+            vec3  sc     = mix(vec3(0.82, 0.90, 1.0),      // bleue
+                               vec3(1.0,  0.86, 0.68),     // orangée
+                               h.x);
+            col += sc * dot_ * bright * bright * 2.4;
+        }
+    }
+    return col;
+}
+
+// Ombre portée : 0 si occulté, 1 sinon
 float hardShadow(vec3 ro, vec3 lightPos, int selfId) {
     vec3  rd   = normalize(lightPos - ro);
     float dMax = length(lightPos - ro);
@@ -106,47 +127,103 @@ float hardShadow(vec3 ro, vec3 lightPos, int selfId) {
     return 1.0;
 }
 
-// Éclairage Phong pour planète
-vec3 shadePlanet(vec3 hitPt, vec3 N, vec3 albedo, int bodyId) {
-    vec3  lightPos = vec3(0.0);
-    bool  hasLight = false;
+// ── Relief : perturbation de la normale ─────────────────────────────────
+// La sphère est analytique, donc géométriquement lisse. Pour qu'on voie
+// des montagnes il faut perturber la NORMALE d'après le gradient du champ
+// d'altitude — on l'estime par différences finies le long de deux
+// tangentes. Les géantes gazeuses n'ont pas de surface solide : on les
+// laisse lisses.
+vec3 bumpNormal(vec3 N, float seed, int type, int oct) {
+    if (type == 3) return N;
+
+    int   o   = max(3, oct - 2);
+    float eps = 0.010;
+    vec3  p   = N * 2.6 + vec3(seed * 13.7);
+
+    // Base tangente stable (évite la singularité au pôle)
+    vec3 up = (abs(N.y) < 0.99) ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 t1 = normalize(cross(N, up));
+    vec3 t2 = cross(N, t1);
+
+    float h0 = fbm(p, o);
+    float h1 = fbm(p + t1 * eps * 2.6, o);
+    float h2 = fbm(p + t2 * eps * 2.6, o);
+
+    // Amplitude croissante avec le détail : de loin le relief est invisible
+    float k = (type == 2) ? 0.55 : 1.0;          // la glace est plus lisse
+    vec3  g = ((h1 - h0) * t1 + (h2 - h0) * t2) / eps;
+    return normalize(N - g * 0.035 * k);
+}
+
+// ── Éclairage d'une planète, albédo procédural ──────────────────────────
+vec3 shadePlanet(vec3 hitPt, vec3 N, int id, int oct) {
+    vec3 lightPos = vec3(0.0);
+    bool hasLight = false;
     for (int i = 0; i < uBodyCount; i++) {
         if (uBodies[i].emissive > 0.5) { lightPos = uBodies[i].posRel; hasLight = true; break; }
     }
+
+    int   type = int(uBodies[id].surfType);
+    float gloss;
+    vec3  albedo = surfaceColor(type, uBodies[id].surfSeed,
+                                uBodies[id].color, N, oct, gloss);
     if (!hasLight) return albedo * 0.05;
 
+    // Relief : la normale de l'éclairage est perturbée, pas la géométrie.
+    // On garde N pour le limbe et l'atmosphère, qui suivent la sphère.
+    vec3 Nl = mix(bumpNormal(N, uBodies[id].surfSeed, type, oct), N,
+                  gloss);           // l'eau et la glace restent lisses
+
     vec3  L = normalize(lightPos - hitPt);
-    vec3  V = normalize(-hitPt);              // caméra à l'origine
+    vec3  V = normalize(-hitPt);
     vec3  H = normalize(L + V);
 
-    float diff = max(0.0, dot(N, L));
-    float spec = pow(max(0.0, dot(N, H)), 64.0) * 0.4;
-    // Biais d'ombre proportionnel au rayon : robuste à toutes les échelles
-    float bias = max(1.0, uBodies[bodyId].radius * 1e-4);
-    float shad = hardShadow(hitPt + N * bias, lightPos, bodyId);
+    float diff = max(0.0, dot(Nl, L));
+    // Le brillant dépend du matériau : l'eau et la glace réfléchissent,
+    // la roche et le sable non.
+    float spec = pow(max(0.0, dot(Nl, H)), mix(16.0, 220.0, gloss)) * gloss;
 
-    // Liseré atmosphérique (limbe), visible surtout côté éclairé
-    float rim  = 1.0 - max(0.0, dot(N, V));
-    vec3  atmo = albedo * pow(rim, 4.0) * 0.5 * max(0.0, dot(N, L) + 0.3);
+    float bias = max(1.0, uBodies[id].radius * 1e-4);
+    float shad = hardShadow(hitPt + N * bias, lightPos, id);
 
-    float amb  = 0.025;
+    // Liseré atmosphérique, côté éclairé
+    float rim   = 1.0 - max(0.0, dot(N, V));
+    float atmoK = (type == 3) ? 0.9 : 0.5;                    // gazeuse = plus épais
+    vec3  atmo  = albedo * pow(rim, 4.0) * atmoK * max(0.0, dot(N, L) + 0.3);
+
+    float amb = 0.025;
     return albedo * (amb + shad * diff * 0.975) + vec3(shad * spec) + atmo;
 }
 
-// Surface stellaire : granulation + assombrissement centre-bord.
-//
-// Loi classique : I(mu)/I(0) = 1 - u*(1 - mu), avec mu = cos de l'angle
-// entre la normale et la direction d'observation. u ~ 0.6 pour le Soleil.
-// (L'ancienne version calculait dot(N, -normalize(N)) == -1, donc l'effet
-//  était constant et ne faisait rien.)
-vec3 shadeStar(vec3 hitPt, vec3 N, vec3 baseColor) {
-    vec3  V     = normalize(-hitPt);
-    float mu    = clamp(dot(N, V), 0.0, 1.0);
-    float limb  = 1.0 - 0.6 * (1.0 - mu);
+// ── Photosphère stellaire ───────────────────────────────────────────────
+// Une étoile n'est PAS une surface éclairée : elle émet. Rendue à une
+// luminance de l'ordre de l'unité, elle ressort comme un caillou beige.
+// Il faut émettre très au-dessus de 1 pour que le tone mapping Reinhard
+// la sature vers le blanc — c'est ce qui la fait lire comme une source.
+vec3 shadeStar(vec3 hitPt, vec3 N, vec3 baseColor, float seed, int oct) {
+    vec3  V  = normalize(-hitPt);
+    float mu = clamp(dot(N, V), 0.0, 1.0);
 
-    float grain = hash(floor(N * 18.0)) * 0.15 - 0.075;
-    vec3  hot   = mix(baseColor, vec3(1.0, 0.98, 0.8), 0.4 + grain);
-    return hot * limb * 1.6;
+    // Assombrissement centre-bord d'Eddington : I(mu)/I(0) = 0.4 + 0.6 mu
+    float limb = 0.4 + 0.6 * mu;
+
+    vec3 p = N * 9.0 + vec3(seed * 17.3);
+
+    // Granulation convective : Worley donne de vraies cellules jointives,
+    // ce que la structure réelle de la photosphère est. Contraste faible.
+    vec2  gw   = worley(p * 3.0);
+    float gran = smoothstep(0.0, 0.22, gw.y - gw.x);        // joints sombres
+    float fine = fbm(p * 7.0, min(oct, 5)) * 0.5 + 0.5;
+
+    // Taches : rares, sombres, avec pénombre — pas un réseau de veines.
+    float spotField = fbm(p * 0.65 + 55.0, 4) * 0.5 + 0.5;
+    float umbra     = smoothstep(0.74, 0.86, spotField);
+
+    vec3 photo = mix(baseColor, vec3(1.0, 0.97, 0.90), 0.55);
+    photo *= mix(0.93, 1.06, gran * 0.55 + fine * 0.45);  // granulation discrète
+    photo  = mix(photo, baseColor * 0.10, umbra * 0.9);   // ombre des taches
+
+    return photo * limb * 5.0;      // >> 1 : sature vers le blanc incandescent
 }
 
 // Couronne / halo
@@ -159,16 +236,22 @@ vec3 solarGlow(vec3 rd) {
         if (dist < 1e-6) continue;
         vec3  dirS  = toSun / dist;
         float cosA  = clamp(dot(rd, dirS), -1.0, 1.0);
-        float angR  = atan(uBodies[i].radius / dist);
-        float angC  = acos(cosA);
-        float g     = smoothstep(angR * 10.0, angR * 0.8, angC);
-        glow += uBodies[i].color * g * 0.55;
+        float angR  = atan(uBodies[i].radius / dist);      // rayon apparent
+        float angC  = acos(cosA);                          // écart au centre
+
+        // Brillance coronale : elle chute comme une puissance de la
+        // distance au limbe, exprimée en RAYONS STELLAIRES. Une extension
+        // proportionnelle au rayon apparent (« angR * 10 ») valait
+        // plusieurs radians vue de près et badigeonnait tout le ciel.
+        float x = angC / max(angR, 1e-9);      // 1 = limbe, 2 = un rayon plus loin
+        float g = (x > 1.0) ? pow(1.0 / x, 3.5) : 1.0;
+        glow += uBodies[i].color * g * 0.40;
     }
     return glow;
 }
 
 void main() {
-    vec3 ro = vec3(0.0);       // caméra à l'origine
+    vec3 ro = vec3(0.0);          // caméra à l'origine
     vec3 rd = normalize(vRayDir);
 
     float tBest  = 1e30;
@@ -189,39 +272,57 @@ void main() {
     } else {
         vec3 hitPt = ro + rd * tBest;
         vec3 N     = normalize(hitPt - uBodies[idBest].posRel);
+        int  oct   = octavesFor(uBodies[idBest].radius,
+                                length(uBodies[idBest].posRel));
+
         if (uBodies[idBest].emissive > 0.5)
-            col = shadeStar(hitPt, N, uBodies[idBest].color);
+            col = shadeStar(hitPt, N, uBodies[idBest].color,
+                            uBodies[idBest].surfSeed, oct);
         else
-            col = shadePlanet(hitPt, N, uBodies[idBest].color, idBest);
+            col = shadePlanet(hitPt, N, idBest, oct);
     }
 
-    // Tone mapping Reinhard + gamma
+    // ── Tone mapping sur la LUMINANCE ────────────────────────────────
+    // Un Reinhard par canal comprime davantage le canal fort que le canal
+    // faible : toute couleur saturée est ramenée vers le gris. Le rouille
+    // de Mars (1.28, 0.63, 0.36) en ressortait beige. On compresse donc la
+    // luminance et on conserve le rapport des canaux ; seules les très
+    // hautes lumières sont poussées vers le blanc, comme une vraie
+    // surexposition (c'est ce qui garde le Soleil blanc).
     col *= uExposure;
-    col  = col / (col + vec3(1.0));
-    col  = pow(col, vec3(1.0 / 2.2));
+    float l  = max(luminance(col), 1e-6);
+    float ln = l / (1.0 + l);
+    col *= ln / l;
+    col  = mix(col, vec3(ln), pow(ln, 4.0));
+    col  = pow(clamp(col, 0.0, 1.0), vec3(1.0 / 2.2));
     fragColor = vec4(col, 1.0);
 }
 )GLSL";
+
+// Montage final du fragment shader des corps.
+inline std::string fragmentSource() {
+    return std::string(FS_HEAD) + NOISE + SURFACE + FS_BODY;
+}
 
 // ════════════════════════════════════════════════════════════════════════
 //  PASSE 2 — TRAIL D'ORBITE
 // ════════════════════════════════════════════════════════════════════════
 
-// Projection sans near/far : on pose clip = (x, y, 0, -z_cam).
-// Le w négatif derrière la caméra assure un clipping correct des segments,
-// et z=0 place la ligne toujours dans [-w,w] — inutile de choisir des plans
+// Projection sans near/far : clip = (x, y, 0, -z_cam). Le w négatif
+// derrière la caméra assure un clipping correct des segments, et z = 0
+// place la ligne toujours dans [-w, w] — inutile de choisir des plans
 // near/far, ce qui serait un cauchemar à des échelles de 10^9 km.
 static const char* TRAIL_VS = R"GLSL(
 #version 330 core
-layout(location=0) in vec3 aPosRel;   // position relative à la caméra (km)
+layout(location=0) in vec3 aPosRel;
 
-uniform mat4  uRot;      // rotation monde → caméra
+uniform mat4  uRot;
 uniform float uHalfW;
 uniform float uHalfH;
-uniform int   uCount;    // nombre de points du trail
+uniform int   uCount;
 
 out vec3  vPosRel;
-out float vFade;         // 0 = plus ancien, 1 = plus récent
+out float vFade;
 
 void main() {
     vec3 pc = (uRot * vec4(aPosRel, 0.0)).xyz;
@@ -243,6 +344,8 @@ struct SphereBody {
     float radius;
     vec3  color;
     float emissive;
+    float surfType;
+    float surfSeed;
 };
 
 uniform int        uBodyCount;
@@ -262,8 +365,8 @@ bool raySphere(vec3 ro, vec3 rd, vec3 ce, float ra, out float tNear, out float t
 }
 
 void main() {
-    // Occlusion : le ray caster n'écrit pas de depth, donc on teste si un
-    // corps s'interpose entre la caméra (origine) et ce point du trail.
+    // Le ray caster n'écrit pas de depth buffer : on teste donc à la main
+    // si un corps s'interpose entre la caméra (origine) et ce point.
     float dist = length(vPosRel);
     vec3  rd   = vPosRel / dist;
     for (int i = 0; i < uBodyCount; i++) {

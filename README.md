@@ -109,6 +109,76 @@ Un header, une responsabilité.
 | `GL.hpp` | accès direct à OpenGL 3.3, sans dépendance de loader |
 | `UI.hpp` | panneau ImGui |
 
+## Surfaces procédurales
+
+Le ray casting analytique donne à chaque fragment le point d'impact et la
+normale **exacts**. Le bruit est donc évalué directement en espace objet 3D :
+pas de coordonnées UV, donc pas de couture ni de distorsion polaire, et un
+détail qui ne s'épuise jamais au zoom.
+
+### Quatre catégories
+
+| Catégorie | Traits |
+|---|---|
+| **Tellurique** | océans profonds/côtiers, continents, biomes par latitude et altitude, chaînes de montagnes, ceintures désertiques, calottes |
+| **Désertique** | bassins basaltiques, cratères à bourrelet, réseaux de canyons, dunes anisotropes, plaques d'oxyde, calottes de volatils |
+| **Glacée** | linéaments à la Europe, joints de plaques, dépôts organiques, givre |
+| **Géante gazeuse** | bandes zonales, turbulence advectée en longitude, tourbillons ovales |
+
+### Un génome par planète
+
+Le CPU n'envoie que **deux nombres** par corps : la catégorie et la graine.
+Toute la palette est dérivée sur le GPU. Cela tient dans le budget
+d'uniformes (10 composantes par corps au lieu de 24) et surtout, c'est ce
+qui donne le comportement voulu : deux mondes désertiques partagent la
+famille chromatique de leur teinte, mais pas leur géologie.
+
+Car la graine n'est pas un simple décalage du domaine de bruit — un
+décalage donne la *même* planète vue ailleurs. Elle engendre une douzaine
+de **paramètres de structure** : échelle des continents, niveau des mers,
+force du relief, densité de cratères, ampleur des canyons, couverture de
+dunes, étendue des calottes, contraste d'albédo, nombre de bandes… Mercure
+sort criblé de cratères, Mars couvert de grands bassins sombres, Vénus
+lisse et strié de canyons ténus.
+
+### Détails qui comptent
+
+- **Gradients normalisés.** Tirés composante par composante, ils se
+  répartissent dans un cube : les diagonales sont √3 fois plus longues que
+  les axes, ce qui aligne les iso-contours du bruit sur la grille et
+  produit des terrasses rectangulaires sur les côtes.
+- **Détail côtier.** Les extrema de Perlin se placent *sur* la grille, et
+  un trait de côte est une iso-contour. Une octave fine ajoutée au champ
+  la rend fractale et casse l'alignement résiduel.
+- **Bruit cellulaire (Worley).** Indispensable aux cratères : aucune somme
+  d'octaves ne produit d'anneaux. Sert aussi aux joints de plaques
+  glaciaires, aux tourbillons gazeux et à la granulation solaire.
+- **Relief.** La sphère étant analytiquement lisse, on perturbe la
+  *normale* d'éclairage d'après le gradient du champ d'altitude.
+- **Tone mapping sur la luminance.** Un Reinhard par canal comprime plus
+  le canal fort que le canal faible : toute couleur saturée vire au
+  pastel. Le rouille de Mars en ressortait beige.
+- **Photosphère.** Une étoile émet, elle n'est pas éclairée. Rendue à une
+  luminance d'ordre 1, elle ressemble à un caillou beige ; il faut émettre
+  très au-dessus de 1 pour que le tone mapping la sature en blanc.
+
+### Coût
+
+Le nombre d'octaves est indexé sur la taille apparente du corps à l'écran
+(une octave de plus par doublement) — première brique du LOD.
+
+| Scène, 2880 × 1800 | |
+|---|---|
+| vue système | 1,8 ms — 553 FPS |
+| gros plan planète (10 octaves + Worley) | 29,6 ms — 34 FPS |
+
+## Captures
+
+```bash
+./build/SolarSystem --shot img.bmp --body Mars --dist 2.6 --scale reel --size 800 800
+./build/SolarSystem --bench 150 --body Terre --dist 2.2      # chronométrage
+```
+
 ## Rendu
 
 Ray casting analytique sphère/rayon dans un fragment shader plein écran :

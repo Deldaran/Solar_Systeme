@@ -52,6 +52,10 @@ typedef std::ptrdiff_t GLsizeiptr;
 #define GL_ONE_MINUS_SRC_ALPHA            0x0303
 #define GL_FLOAT                          0x1406
 #define GL_COLOR_BUFFER_BIT               0x00004000
+#define GL_RGB                            0x1907
+#define GL_RGBA                           0x1908
+#define GL_UNSIGNED_BYTE                  0x1401
+#define GL_PACK_ALIGNMENT                 0x0D05
 #define GL_ARRAY_BUFFER                   0x8892
 #define GL_STATIC_DRAW                    0x88E4
 #define GL_DYNAMIC_DRAW                   0x88E8
@@ -69,6 +73,8 @@ typedef std::ptrdiff_t GLsizeiptr;
   X(void,   Disable,               (GLenum))                                   \
   X(void,   BlendFunc,             (GLenum,GLenum))                            \
   X(void,   DrawArrays,            (GLenum,GLint,GLsizei))                     \
+  X(void,   ReadPixels,            (GLint,GLint,GLsizei,GLsizei,GLenum,GLenum,void*)) \
+  X(void,   PixelStorei,           (GLenum,GLint))                             \
   X(GLuint, CreateShader,          (GLenum))                                   \
   X(void,   ShaderSource,          (GLuint,GLsizei,const GLchar* const*,const GLint*)) \
   X(void,   CompileShader,         (GLuint))                                   \

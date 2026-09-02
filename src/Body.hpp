@@ -26,9 +26,15 @@ struct Body {
     double       radius;       // km (physique réel)
 
     // ── Apparence GPU ─────────────────────────
-    glm::vec3    color;
+    glm::vec3    color;        // teinte identitaire ; base de la palette procédurale
     float        emissive;     // 0 = planète réfléchissante, 1 = étoile
     float        visualScale;  // multiplicateur du rayon pour le GPU
+
+    // ── Surface procédurale (cf. Surface.hpp / SurfaceGLSL.hpp) ────────
+    // La palette n'est pas stockée : elle est dérivée sur le GPU de
+    // (surfaceType, surfaceSeed, color). Deux flottants suffisent donc.
+    int          surfaceType = 0;    // Surface::Type
+    float        surfaceSeed = 0.f;
 
     // Rayon tel que transmis au GPU = radius * visualScale
     float visualRadius() const {

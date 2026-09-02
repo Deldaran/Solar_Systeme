@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
 
 class Renderer {
 public:
@@ -32,13 +33,15 @@ public:
         buildQuad();
         buildTrailBuffer();
 
-        m_prog = buildProgram(Shaders::VS, Shaders::FS);
+        const std::string fs = Shaders::fragmentSource();
+        m_prog = buildProgram(Shaders::VS, fs.c_str());
         cacheBodyLocations(m_prog, m_loc);
         m_uInvRot   = glGetUniformLocation(m_prog, "uInvRot");
         m_uHalfW    = glGetUniformLocation(m_prog, "uHalfW");
         m_uHalfH    = glGetUniformLocation(m_prog, "uHalfH");
         m_uCount    = glGetUniformLocation(m_prog, "uBodyCount");
         m_uExposure = glGetUniformLocation(m_prog, "uExposure");
+        m_uScreenH  = glGetUniformLocation(m_prog, "uScreenH");
 
         m_trailProg = buildProgram(Shaders::TRAIL_VS, Shaders::TRAIL_FS);
         cacheBodyLocations(m_trailProg, m_tloc);
@@ -86,6 +89,7 @@ public:
         glUniform1f(m_uExposure, exposure);
         glUniform1f(m_uHalfW, m_halfW);
         glUniform1f(m_uHalfH, m_halfH);
+        glUniform1f(m_uScreenH, float(fbH));      // pilote le LOD d'octaves
 
         glm::mat4 invRot = cam.invRotationMatrix();
         glUniformMatrix4fv(m_uInvRot, 1, GL_FALSE, glm::value_ptr(invRot));
@@ -163,14 +167,15 @@ public:
     static constexpr int TRAIL_CAPACITY = 4000;
 
 private:
-    struct BodyLoc { GLint posRel, radius, color, emissive; };
+    struct BodyLoc { GLint posRel, radius, color, emissive, surfType, surfSeed; };
 
     GLuint m_vao = 0, m_vbo = 0, m_prog = 0;
     GLuint m_trailVao = 0, m_trailVbo = 0, m_trailProg = 0;
 
     BodyLoc m_loc[Constants::MAX_BODIES];
     BodyLoc m_tloc[Constants::MAX_BODIES];
-    GLint m_uInvRot = -1, m_uHalfW = -1, m_uHalfH = -1, m_uCount = -1, m_uExposure = -1;
+    GLint m_uInvRot = -1, m_uHalfW = -1, m_uHalfH = -1, m_uCount = -1,
+          m_uExposure = -1, m_uScreenH = -1;
     GLint m_tRot = -1, m_tHalfW = -1, m_tHalfH = -1, m_tCount = -1,
           m_tBodyCount = -1, m_tTrailColor = -1;
 
@@ -193,6 +198,10 @@ private:
             out[i].color    = glGetUniformLocation(prog, buf);
             snprintf(buf, sizeof buf, "uBodies[%d].emissive", i);
             out[i].emissive = glGetUniformLocation(prog, buf);
+            snprintf(buf, sizeof buf, "uBodies[%d].surfType", i);
+            out[i].surfType = glGetUniformLocation(prog, buf);
+            snprintf(buf, sizeof buf, "uBodies[%d].surfSeed", i);
+            out[i].surfSeed = glGetUniformLocation(prog, buf);
         }
     }
 
@@ -203,6 +212,8 @@ private:
             glUniform1f (loc[i].radius, b.visualRadius());
             glUniform3fv(loc[i].color, 1, glm::value_ptr(b.color));
             glUniform1f (loc[i].emissive, b.emissive);
+            glUniform1f (loc[i].surfType, float(b.surfaceType));
+            glUniform1f (loc[i].surfSeed, b.surfaceSeed);
         }
     }
 

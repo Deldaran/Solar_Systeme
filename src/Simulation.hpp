@@ -16,7 +16,7 @@ class Simulation {
 public:
     bool   paused        = false;
     double deltaT        = Constants::DAY_S;   // secondes simulées par frame
-    int    stepsPerFrame = 10;                 // sous-étapes Verlet par frame
+    int    stepsPerFrame = 48;                 // sous-étapes Verlet par frame
     bool   showTrail     = true;
 
     double simTime       = 0.0;

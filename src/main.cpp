@@ -10,6 +10,8 @@
 
 #include <glm/gtc/constants.hpp>
 #include <cstdio>
+#include <cstring>
+#include <string>
 
 #include "Constants.hpp"
 #include "Body.hpp"
@@ -21,6 +23,7 @@
 #include "Simulation.hpp"
 #include "Renderer.hpp"
 #include "UI.hpp"
+#include "Screenshot.hpp"
 
 // ─────────────────────────────────────────────────────────────────────
 //  État global
@@ -177,8 +180,52 @@ static void updateFreeFlight(float dt)
 }
 
 // ─────────────────────────────────────────────────────────────────────
-int main()
+//  Mode capture : rend une image hors interface puis quitte.
+//    --shot <f.bmp> [--body <nom>] [--dist <x rayons>] [--scale <mode>]
+//    [--size <w> <h>] [--gui]
+//  Sert a valider le rendu procedural sans dependre de l'affichage.
+// ─────────────────────────────────────────────────────────────────────
+struct ShotOptions {
+    bool        enabled = false;
+    std::string path;
+    std::string body;
+    float       distRadii = 3.f;
+    float       theta = -2.1f, phi = 0.22f;   // angle par defaut : face eclairee
+    int         w = 1280, h = 800;
+    bool        gui = false;
+    bool        trail = true;
+    int         bench = 0;          // nombre de frames a chronometrer
+    int         scaleMode = -1;      // -1 = laisser le defaut
+};
+
+static ShotOptions parseArgs(int argc, char** argv)
 {
+    ShotOptions o;
+    for (int i = 1; i < argc; ++i) {
+        auto next = [&](const char* def) -> const char* {
+            return (i + 1 < argc) ? argv[++i] : def;
+        };
+        if      (!strcmp(argv[i], "--shot"))  { o.enabled = true; o.path = next("shot.bmp"); }
+        else if (!strcmp(argv[i], "--body"))  o.body = next("");
+        else if (!strcmp(argv[i], "--dist"))  o.distRadii = (float)atof(next("3"));
+        else if (!strcmp(argv[i], "--gui"))   o.gui = true;
+        else if (!strcmp(argv[i], "--theta")) o.theta = (float)atof(next("-2.1"));
+        else if (!strcmp(argv[i], "--phi"))   o.phi   = (float)atof(next("0.22"));
+        else if (!strcmp(argv[i], "--notrail")) o.trail = false;
+        else if (!strcmp(argv[i], "--bench")) { o.enabled = true; o.bench = atoi(next("120")); }
+        else if (!strcmp(argv[i], "--size"))  { o.w = atoi(next("1280")); o.h = atoi(next("800")); }
+        else if (!strcmp(argv[i], "--scale")) {
+            std::string m = next("schema");
+            o.scaleMode = (m == "reel") ? 0 : (m == "coherent") ? 1 : 2;
+        }
+    }
+    return o;
+}
+
+int main(int argc, char** argv)
+{
+    const ShotOptions shot = parseArgs(argc, argv);
+
     if (!glfwInit()) { fprintf(stderr, "[ERREUR] glfwInit a echoue\n"); return 1; }
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
@@ -187,9 +234,11 @@ int main()
 #ifdef __APPLE__
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
 #endif
+    if (shot.enabled) glfwWindowHint(GLFW_VISIBLE, GLFW_FALSE);
 
     GLFWwindow* window = glfwCreateWindow(
-        1440, 900, "Solar System — contextes float64 / rendu float32",
+        shot.enabled ? shot.w : 1440, shot.enabled ? shot.h : 900,
+        "Solar System — contextes float64 / rendu float32",
         nullptr, nullptr);
     if (!window) {
         fprintf(stderr, "[ERREUR] Impossible de creer un contexte OpenGL 3.3\n");
@@ -216,7 +265,26 @@ int main()
     ImGui_ImplOpenGL3_Init("#version 330 core");
 
     g_renderer.init();
+    if (shot.scaleMode >= 0) g_ui.scaleMode = (VisualScale::Mode)shot.scaleMode;
     initScene();
+
+    // ── Mise en place de la capture ──────────────────────────────────
+    int    shotFrames = 0;
+    double benchStart = 0.0;
+    if (shot.enabled && !shot.trail) g_sim.showTrail = false;
+    if (shot.enabled && !shot.body.empty()) {
+        for (int i = 0; i < (int)g_sys.bodies.size(); ++i) {
+            if (g_sys.bodies[i].name == shot.body) {
+                Navigation::focusOn(g_camera, g_sys.frames, g_sys.bodies, i, false);
+                g_camera.distance = float(g_sys.bodies[i].visualRadius()
+                                          * shot.distRadii);
+                g_camera.theta = shot.theta; g_camera.phi = shot.phi;
+                g_camera.updateFromOrbit();
+                g_ui.followBodyIndex = i;
+                break;
+            }
+        }
+    }
 
     // ── Boucle principale ────────────────────────────────────────────
     while (!glfwWindowShouldClose(window))
@@ -267,6 +335,29 @@ int main()
                 g_renderer.drawTrail(g_camera, g_sim.trail, g_sim.trailFrame,
                                      g_sys.frames, g_sys.bodies,
                                      glm::vec3(0.35f, 0.75f, 1.f));
+        }
+
+        // ── Chronométrage : mesure le coût réel du fragment shader ────
+        if (shot.bench > 0) {
+            if (shotFrames == 0) benchStart = glfwGetTime();
+            if (++shotFrames >= shot.bench) {
+                double ms = (glfwGetTime() - benchStart) * 1000.0 / shot.bench;
+                printf("%.3f ms/frame  (%.1f FPS)  %dx%d  %d corps\n",
+                       ms, 1000.0 / ms, fbW, fbH, g_renderer.visibleCount());
+                break;
+            }
+            glfwSwapBuffers(window);
+            continue;
+        }
+
+        // ── Capture : quelques frames pour laisser tout se stabiliser ─
+        if (shot.enabled) {
+            if (++shotFrames >= 3) {
+                if (Screenshot::capture(shot.path.c_str(), fbW, fbH))
+                    printf("capture ecrite : %s (%dx%d)\n", shot.path.c_str(), fbW, fbH);
+                break;
+            }
+            if (!shot.gui) { glfwSwapBuffers(window); continue; }
         }
 
         // ── ImGui ────────────────────────────────────────────────────

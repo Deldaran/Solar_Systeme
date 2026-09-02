@@ -11,6 +11,7 @@
 #include "Camera.hpp"
 #include "Navigation.hpp"
 #include "VisualScale.hpp"
+#include "Surface.hpp"
 #include "Simulation.hpp"
 #include "Physics.hpp"
 #include "Constants.hpp"
@@ -237,7 +238,20 @@ public:
                     int fr = fg.frameAnchoredTo(i);
                     if (fr >= 0 && fg.frames[fr].soi > 0.0)
                         ImGui::Text("SOI : %.4e km", fg.frames[fr].soi);
-                    ImGui::ColorEdit3("Couleur", &b.color.x);
+                    // ── Surface procédurale ────────────────────────
+                    if (b.emissive < 0.5f) {
+                        int st = b.surfaceType;
+                        if (ImGui::Combo("Categorie", &st, Surface::names(), Surface::COUNT))
+                            b.surfaceType = st;
+                        ImGui::SliderFloat("Graine", &b.surfaceSeed, 0.f, 1000.f, "%.2f");
+                        ImGui::SameLine();
+                        if (ImGui::SmallButton("Tirer"))
+                            b.surfaceSeed = float((m_rng = m_rng * 1103515245u + 12345u)
+                                                  % 100000u) * 0.01f;
+                    }
+                    ImGui::ColorEdit3("Teinte", &b.color.x);
+                    ImGui::TextDisabled("La palette est derivee sur le GPU de");
+                    ImGui::TextDisabled("(categorie, graine, teinte).");
                     if (ImGui::Button("Cibler")) {
                         Navigation::focusOn(cam, fg, bodies, i, false);
                         cam.distance    = Navigation::framingDistance(b);
@@ -316,6 +330,7 @@ private:
     std::vector<Body> m_initialBodies;
     double            m_energy0        = 0.0;
     bool              m_toggleRequested = false;
+    unsigned          m_rng             = 22222u;
 
     // Parcours récursif : chaque contexte sous son vrai parent. Un affichage
     // linéaire trié par index rangerait la Lune sous Neptune.

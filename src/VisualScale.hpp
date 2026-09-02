@@ -91,7 +91,11 @@ inline void applySchematic(std::vector<Body>& bodies, float K)
 }
 
 // Valeur de K rendant la Terre lisible depuis quelques UA.
-constexpr float K_DEFAULT = 38000.f;
+// À K = 38000 le Soleil rendu atteint 3.2e7 km, soit 55 % de l'orbite de
+// Mercure : le système paraît tassé. 16000 laisse respirer les orbites
+// tout en gardant la Terre visible depuis quelques UA. C'est LE curseur
+// du compromis « voir les planètes » / « voir les distances ».
+constexpr float K_DEFAULT = 16000.f;
 
 inline void apply(std::vector<Body>& bodies, const FrameGraph& fg,
                   Mode mode, float K)
