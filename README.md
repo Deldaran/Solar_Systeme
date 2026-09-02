@@ -139,15 +139,67 @@ L'UI affiche un garde-fou calculé depuis le temps dynamique réel du système
 (`min √(r³/Gm)` sur les paires, soit la Lune ici) et signale quand le pas de
 temps devient trop grand pour rester stable.
 
+## Caméra
+
+Deux modes, **V** bascule de l'un à l'autre. La bascule préserve exactement
+la position et la direction du regard — rien ne saute.
+
+### Orbite
+
+Tourne autour d'un corps. Cibler un corps fait **entrer la caméra dans son
+contexte**, et la cible devient littéralement `(0,0,0)` : le corps est donc
+au centre exact de l'écran, indéfiniment, sans qu'aucune coordonnée ne soit
+recalculée frame après frame. Mesuré sur les 10 corps et sur 10 ans
+simulés, l'écart au centre reste à 5×10⁻⁸ en coordonnées écran — soit 10⁻⁵
+pixel, qui est le plancher imposé par la matrice de rotation en float32.
+
+### Vol libre
+
+Déplacement 6 axes pour se balader dans le système. La **vitesse est
+indexée sur l'altitude** au-dessus de la surface la plus proche : on
+traverse en ~4 secondes l'espace libre devant soi, quelle que soit
+l'échelle. Une vitesse fixe serait inutilisable — soit 300 ans pour aller
+de la Terre à Mars, soit une planète traversée en une frame.
+
+| Altitude | Vitesse |
+|---|---|
+| posé sur une surface | 50 m/s |
+| 1 000 km | 250 km/s |
+| orbite lunaire | 96 100 km/s |
+| 1 UA | 3,7 × 10⁷ km/s |
+
+Les sphères d'influence font basculer le contexte automatiquement pendant
+le vol, par translation exacte — d'où l'absence de discontinuité.
+
+## Taille des corps
+
+Un système solaire réel est invisible : la Terre vue de 3 UA couvre 2×10⁻⁵
+radian, soit 1/300 de pixel. Il faut donc grossir, mais grossir
+*linéairement* casse tout — à ×800 la Terre fait 5,1 × 10⁶ km de rayon,
+soit **7 fois le Soleil**. Trois régimes, chacun cohérent avec un usage :
+
+| Mode | Principe |
+|---|---|
+| **Réel** | 1:1. La vérité physique. À explorer en vol libre. |
+| **Cohérent** | Un facteur **unique** pour tous les corps, le plus grand qui ne fasse se toucher aucune paire (×37,5, fixé par le couple Terre–Lune). Les proportions réelles sont exactement préservées : le rapport Soleil/Terre rendu vaut 109,2, comme le vrai. |
+| **Schématique** | `r_visuel = K·√r_réel`. La loi de puissance comprime la dynamique sans jamais inverser l'ordre des tailles : le Soleil reste le plus gros, Jupiter devant Mercure. C'est une carte, pas une photo — à fort K la Lune passe sous la surface de la Terre. |
+
+Un facteur *par corps* serait une erreur de conception : le voisin le plus
+proche d'Uranus étant à 1,1 × 10⁹ km, il grossirait 22 000× pendant que la
+Terre resterait à 15×, et la hiérarchie n'aurait plus aucun sens.
+
 ## Commandes
 
-| | |
-|---|---|
-| Clic gauche + glisser | orbite |
-| Molette | zoom |
-| Espace | pause |
+| Touche | Orbite | Vol libre |
+|---|---|---|
+| **V** | passer en vol libre | passer en orbite (autour du corps le plus proche) |
+| Clic gauche + glisser | tourner autour de la cible | regarder autour (convention FPS) |
+| Molette | zoom | régler la vitesse |
+| WASD | — | avancer / reculer / gauche / droite |
+| Espace / C | pause | monter / descendre |
+| Maj / Ctrl | — | turbo ×5 / précision ×0,2 |
+| P | pause | pause |
 
-Le panneau permet de suivre un corps (la caméra entre alors dans son
-contexte, la cible vaut exactement zéro), de forcer un contexte, de basculer
-entre échelles réelles et planètes grossies, et de lire la résolution
-float64 effective à la position courante.
+Le panneau permet aussi de forcer un contexte, de tracer l'orbite de
+n'importe quel corps, et de lire la résolution float64 effective à la
+position courante comparée à ce qu'elle serait en coordonnées absolues.

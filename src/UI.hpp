@@ -9,6 +9,8 @@
 #include "Body.hpp"
 #include "Frame.hpp"
 #include "Camera.hpp"
+#include "Navigation.hpp"
+#include "VisualScale.hpp"
 #include "Simulation.hpp"
 #include "Physics.hpp"
 #include "Constants.hpp"
@@ -21,18 +23,25 @@
 
 class UI {
 public:
-    int   followBodyIndex = -1;   // -1 = caméra libre
+    int   followBodyIndex = -1;   // -1 = aucun suivi
     float exposure        = 1.f;
-    bool  autoContext     = true; // changement de contexte par sphère d'influence
+    bool  autoContext     = true; // bascule de contexte par sphère d'influence
 
-    // Retourne true si la caméra a été modifiée (besoin de updateFromOrbit)
+    // ── Dimensionnement visuel ────────────────────────────────────────
+    VisualScale::Mode scaleMode  = VisualScale::Mode::Schematique;
+    float             scaleK     = VisualScale::K_DEFAULT;
+    bool              scaleDirty = false;   // main recalcule et remet à false
+
+    // Retourne true si la caméra doit être rafraîchie
     bool draw(Camera& cam, std::vector<Body>& bodies, const FrameGraph& fg,
-              Simulation& sim, float fps, float screenH, int drawnBodies)
+              Simulation& sim, float fps, float screenH, int drawnBodies,
+              const Navigation::Nearest& nearInfo)
     {
         bool camDirty = false;
+        const bool freeMode = (cam.mode == Camera::Mode::Free);
 
         ImGui::SetNextWindowPos(ImVec2(10, 10), ImGuiCond_Always);
-        ImGui::SetNextWindowSize(ImVec2(430, 0), ImGuiCond_Always);
+        ImGui::SetNextWindowSize(ImVec2(440, 0), ImGuiCond_Always);
         ImGui::Begin("Solar System", nullptr,
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize);
 
@@ -40,15 +49,149 @@ public:
             formatTime(sim.simTime).c_str());
         ImGui::Separator();
 
-        // ── Simulation ────────────────────────────────────────────────
+        // ══ Caméra ═══════════════════════════════════════════════════
+        if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+            if (freeMode)
+                ImGui::TextColored(ImVec4(0.4f, 1, 0.6f, 1), "Mode : VOL LIBRE");
+            else
+                ImGui::TextColored(ImVec4(1, 0.85f, 0.4f, 1), "Mode : ORBITE");
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Basculer (V)")) m_toggleRequested = true;
+
+            if (freeMode) {
+                double v = Navigation::freeFlySpeed(nearInfo.altitude, cam.speedBoost);
+                ImGui::Text("Vitesse : %s", formatSpeed(v).c_str());
+                ImGui::TextDisabled("ZQSD/WASD deplacer | Espace/C monter-descendre");
+                ImGui::TextDisabled("Maj turbo x5 | Ctrl precision x0.2 | Molette reglage");
+                ImGui::SliderFloat("Multiplicateur", &cam.speedBoost, 0.01f, 100.f,
+                                   "%.2f", ImGuiSliderFlags_Logarithmic);
+                if (nearInfo.index >= 0)
+                    ImGui::Text("Corps le plus proche : %s  (altitude %s)",
+                        bodies[nearInfo.index].name.c_str(),
+                        formatDistance(nearInfo.altitude).c_str());
+            } else {
+                camDirty |= ImGui::SliderFloat("Azimut", &cam.theta,
+                    -glm::pi<float>(), glm::pi<float>());
+                camDirty |= ImGui::SliderFloat("Elevation", &cam.phi,
+                    -glm::half_pi<float>() + 0.05f,
+                     glm::half_pi<float>() - 0.05f);
+                float distAU = cam.distance / float(Constants::AU_KM);
+                if (ImGui::SliderFloat("Distance (UA)", &distAU, 1e-7f, 60.f,
+                                       "%.7f", ImGuiSliderFlags_Logarithmic)) {
+                    cam.distance = distAU * float(Constants::AU_KM);
+                    camDirty = true;
+                }
+                ImGui::TextDisabled("   = %s", formatDistance(cam.distance).c_str());
+            }
+
+            camDirty |= ImGui::SliderFloat("FOV", &cam.fov, 5.f, 120.f);
+            ImGui::SliderFloat("Exposition", &exposure, 0.1f, 4.f);
+
+            // ── Cible ──────────────────────────────────────────────────
+            const char* current = (followBodyIndex >= 0 &&
+                                   followBodyIndex < (int)bodies.size())
+                                ? bodies[followBodyIndex].name.c_str()
+                                : (freeMode ? "(vol libre)" : "(aucune)");
+            if (ImGui::BeginCombo("Cibler", current)) {
+                for (int i = 0; i < (int)bodies.size(); ++i) {
+                    if (ImGui::Selectable(bodies[i].name.c_str(), followBodyIndex == i)) {
+                        // Entre dans le contexte du corps : sa cible devient
+                        // (0,0,0), donc il est au centre EXACT de l'écran.
+                        Navigation::focusOn(cam, fg, bodies, i, false);
+                        cam.distance    = Navigation::framingDistance(bodies[i]);
+                        followBodyIndex = i;
+                        camDirty        = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (!freeMode && followBodyIndex >= 0) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("Lacher")) followBodyIndex = -1;
+            }
+        }
+        ImGui::Separator();
+
+        // ══ Taille des corps ═════════════════════════════════════════
+        if (ImGui::CollapsingHeader("Taille des corps", ImGuiTreeNodeFlags_DefaultOpen)) {
+            int m = (int)scaleMode;
+            const char* items[] = { "Reel (1:1)",
+                                    "Coherent (sans chevauchement)",
+                                    "Schematique (hierarchie preservee)" };
+            if (ImGui::Combo("Mode", &m, items, 3)) {
+                scaleMode  = (VisualScale::Mode)m;
+                scaleDirty = true;
+            }
+            if (scaleMode == VisualScale::Mode::Schematique) {
+                if (ImGui::SliderFloat("Grossissement K", &scaleK, 0.f, 120000.f, "%.0f"))
+                    scaleDirty = true;
+                ImGui::TextDisabled("r_visuel = K * sqrt(r_reel) : comprime la");
+                ImGui::TextDisabled("dynamique sans inverser l'ordre des tailles.");
+            }
+            switch (scaleMode) {
+                case VisualScale::Mode::Reel:
+                    ImGui::TextDisabled("Echelle physique exacte. Les planetes sont");
+                    ImGui::TextDisabled("invisibles de loin : passez en vol libre (V).");
+                    break;
+                case VisualScale::Mode::Coherent:
+                    ImGui::TextDisabled("Chaque corps grossi au maximum sans empieter");
+                    ImGui::TextDisabled("sur son voisin. La Lune reste hors de la Terre.");
+                    break;
+                case VisualScale::Mode::Schematique:
+                    ImGui::TextDisabled("Vue d'ensemble. A fort K la Lune passe sous");
+                    ImGui::TextDisabled("la surface de la Terre : c'est une carte.");
+                    break;
+            }
+        }
+        ImGui::Separator();
+
+        // ══ Contexte ═════════════════════════════════════════════════
+        if (ImGui::CollapsingHeader("Contexte", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::TextColored(ImVec4(0.5f, 0.85f, 1, 1), "Camera dans : %s",
+                fg.valid(cam.frame) ? fg.name(cam.frame).c_str() : "?");
+            ImGui::Text("Position locale : %.3f  %.3f  %.3f km",
+                        cam.pos.x, cam.pos.y, cam.pos.z);
+
+            glm::dvec3 abs = fg.toRoot(cam.pos, cam.frame, bodies);
+            ImGui::TextDisabled("Absolu (diagnostic) : %.4f UA",
+                                glm::length(abs) / Constants::AU_KM);
+
+            // Comparaison de résolution : tout l'argument du modèle.
+            double locMag = std::max(1.0, glm::length(cam.pos));
+            double absMag = std::max(1.0, glm::length(abs));
+            ImGui::Text("Resolution float64 ici : %.2e km", ulpOf(locMag));
+            ImGui::TextDisabled("   (en absolu : %.2e km, soit %.0fx pire)",
+                ulpOf(absMag), ulpOf(absMag) / ulpOf(locMag));
+
+            ImGui::Checkbox("Bascule auto par sphere d'influence", &autoContext);
+            if (ImGui::BeginCombo("Forcer le contexte",
+                    fg.valid(cam.frame) ? fg.name(cam.frame).c_str() : "?")) {
+                for (int f = 0; f < fg.size(); ++f) {
+                    if (ImGui::Selectable(fg.name(f).c_str(), cam.frame == f)) {
+                        // Translation exacte : la caméra ne bouge pas d'un mm
+                        glm::dvec3 v(0.0);
+                        int nf = cam.frame;
+                        cam.target = fg.convert(cam.target, cam.frame, f, bodies);
+                        fg.reparent(cam.pos, v, nf, f, bodies);
+                        cam.frame  = f;
+                        autoContext = false;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+        }
+        ImGui::Separator();
+
+        // ══ Simulation ═══════════════════════════════════════════════
         if (ImGui::CollapsingHeader("Simulation", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::Checkbox("Pause (Espace)", &sim.paused); ImGui::SameLine();
+            ImGui::Checkbox("Pause (P)", &sim.paused); ImGui::SameLine();
             if (ImGui::Button("Reset")) {
                 sim.reset(bodies, m_initialBodies);
                 followBodyIndex = -1;
-                cam.frame  = fg.size() > 1 ? 1 : 0;   // contexte héliocentrique
-                cam.target = glm::dvec3(0);
-                camDirty   = true;
+                cam.frame   = fg.size() > 1 ? 1 : 0;
+                cam.target  = glm::dvec3(0);
+                scaleDirty  = true;
+                camDirty    = true;
             }
 
             float dtD = float(sim.deltaT / Constants::DAY_S);
@@ -57,8 +200,6 @@ public:
                 sim.deltaT = double(dtD) * Constants::DAY_S;
             ImGui::SliderInt("Sous-etapes/frame", &sim.stepsPerFrame, 1, 400);
 
-            // Garde-fou : Verlet reste stable tant que le pas est petit
-            // devant le temps dynamique de l'orbite la plus serrée.
             double sub  = sim.subStepSeconds();
             double reco = Physics::shortestDynamicalTime(bodies, fg) / 20.0;
             ImGui::Text("Sous-pas : %.0f s", sub); ImGui::SameLine();
@@ -70,88 +211,13 @@ public:
 
             if (m_energy0 != 0.0) {
                 double e = Physics::totalEnergy(bodies, fg);
-                ImGui::Text("Derive d'energie : %+.3e", (e - m_energy0) / std::abs(m_energy0));
+                ImGui::Text("Derive d'energie : %+.3e",
+                            (e - m_energy0) / std::abs(m_energy0));
             }
         }
         ImGui::Separator();
 
-        // ── Contexte (le cœur du modèle) ──────────────────────────────
-        if (ImGui::CollapsingHeader("Contexte", ImGuiTreeNodeFlags_DefaultOpen)) {
-            ImGui::TextColored(ImVec4(0.5f, 0.85f, 1, 1), "Camera dans : %s",
-                fg.valid(cam.frame) ? fg.name(cam.frame).c_str() : "?");
-            ImGui::Text("Position locale : %.3f  %.3f  %.3f km",
-                        cam.pos.x, cam.pos.y, cam.pos.z);
-
-            glm::dvec3 abs = fg.toRoot(cam.pos, cam.frame, bodies);
-            ImGui::TextDisabled("Absolu (diagnostic) : %.4e km  (%.4f UA)",
-                glm::length(abs), glm::length(abs) / Constants::AU_KM);
-
-            // Comparaison de résolution : c'est tout l'argument du modèle.
-            double locMag = std::max(1.0, glm::length(cam.pos));
-            double absMag = std::max(1.0, glm::length(abs));
-            ImGui::Text("Resolution float64 ici : %.2e km", ulpOf(locMag));
-            ImGui::TextDisabled("   (en absolu ce serait %.2e km, soit %.0fx pire)",
-                ulpOf(absMag), ulpOf(absMag) / ulpOf(locMag));
-
-            ImGui::Checkbox("Changement de contexte auto (SOI)", &autoContext);
-            if (ImGui::BeginCombo("Forcer le contexte",
-                    fg.valid(cam.frame) ? fg.name(cam.frame).c_str() : "?")) {
-                for (int f = 0; f < fg.size(); ++f) {
-                    if (ImGui::Selectable(fg.name(f).c_str(), cam.frame == f)) {
-                        // Translation exacte : la caméra ne bouge pas d'un mm
-                        glm::dvec3 v(0.0);
-                        int nf = cam.frame;
-                        fg.reparent(cam.pos, v, nf, f, bodies);
-                        cam.target = fg.convert(cam.target, cam.frame, f, bodies);
-                        cam.frame  = f;
-                        autoContext = false;
-                    }
-                }
-                ImGui::EndCombo();
-            }
-        }
-        ImGui::Separator();
-
-        // ── Caméra ────────────────────────────────────────────────────
-        if (ImGui::CollapsingHeader("Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
-            camDirty |= ImGui::SliderFloat("Azimut", &cam.theta,
-                -glm::pi<float>(), glm::pi<float>());
-            camDirty |= ImGui::SliderFloat("Elevation", &cam.phi,
-                -glm::half_pi<float>() + 0.05f,
-                 glm::half_pi<float>() - 0.05f);
-
-            float distAU = cam.distance / float(Constants::AU_KM);
-            if (ImGui::SliderFloat("Distance (UA)", &distAU, 1e-7f, 60.f,
-                                   "%.7f", ImGuiSliderFlags_Logarithmic)) {
-                cam.distance = distAU * float(Constants::AU_KM);
-                camDirty = true;
-            }
-            ImGui::TextDisabled("   = %.0f km", double(cam.distance));
-            camDirty |= ImGui::SliderFloat("FOV", &cam.fov, 5.f, 120.f);
-            ImGui::SliderFloat("Exposition", &exposure, 0.1f, 4.f);
-
-            const char* current = (followBodyIndex >= 0 &&
-                                   followBodyIndex < (int)bodies.size())
-                                ? bodies[followBodyIndex].name.c_str()
-                                : "(camera libre)";
-            if (ImGui::BeginCombo("Suivi", current)) {
-                if (ImGui::Selectable("(camera libre)", followBodyIndex < 0))
-                    followBodyIndex = -1;
-                for (int i = 0; i < (int)bodies.size(); ++i) {
-                    if (ImGui::Selectable(bodies[i].name.c_str(), followBodyIndex == i)) {
-                        followBodyIndex = i;
-                        enterBodyContext(cam, fg, bodies, i);
-                        cam.distance = float(bodies[i].radius *
-                                             double(bodies[i].visualScale) * 8.0);
-                        camDirty = true;
-                    }
-                }
-                ImGui::EndCombo();
-            }
-        }
-        ImGui::Separator();
-
-        // ── Corps célestes ────────────────────────────────────────────
+        // ══ Corps célestes ═══════════════════════════════════════════
         if (ImGui::CollapsingHeader("Corps celestes")) {
             ImGui::BeginChild("bodies", ImVec2(0, 260), true);
             for (int i = 0; i < (int)bodies.size(); ++i) {
@@ -162,36 +228,32 @@ public:
                         fg.valid(b.frame) ? fg.name(b.frame).c_str() : "?");
                     ImGui::Text("Pos locale : %.3f  %.3f  %.3f km",
                                 b.pos.x, b.pos.y, b.pos.z);
-                    ImGui::Text("Vit. locale: %.4f km/s", glm::length(b.vel));
-                    ImGui::TextDisabled("Vit. absolue: %.4f km/s",
+                    ImGui::Text("Vit. locale : %.4f km/s", glm::length(b.vel));
+                    ImGui::TextDisabled("Vit. absolue : %.4f km/s",
                         glm::length(Physics::absoluteVel(b, fg, bodies)));
-                    glm::dvec3 ab = Physics::absolutePos(b, fg, bodies);
-                    ImGui::TextDisabled("Absolu : %.6f UA",
-                        glm::length(ab) / Constants::AU_KM);
                     ImGui::Text("Rayon reel : %.0f km", b.radius);
+                    ImGui::Text("Rayon rendu : %.0f km  (x%.1f)",
+                                double(b.visualRadius()), double(b.visualScale));
                     int fr = fg.frameAnchoredTo(i);
                     if (fr >= 0 && fg.frames[fr].soi > 0.0)
                         ImGui::Text("SOI : %.4e km", fg.frames[fr].soi);
-                    ImGui::SliderFloat("Visual Scale", &b.visualScale, 1.f, 2000.f,
-                                       "%.1f", ImGuiSliderFlags_Logarithmic);
                     ImGui::ColorEdit3("Couleur", &b.color.x);
+                    if (ImGui::Button("Cibler")) {
+                        Navigation::focusOn(cam, fg, bodies, i, false);
+                        cam.distance    = Navigation::framingDistance(b);
+                        followBodyIndex = i;
+                        camDirty        = true;
+                    }
+                    ImGui::SameLine();
                     if (ImGui::Button("Tracer l'orbite")) sim.setTrailBody(i, bodies);
                     ImGui::TreePop();
                 }
                 ImGui::PopID();
             }
             ImGui::EndChild();
-
-            if (ImGui::Button("Echelles reelles"))
-                for (auto& b : bodies) b.visualScale = 1.f;
-            ImGui::SameLine();
-            if (ImGui::Button("Grossir les planetes"))
-                for (auto& b : bodies)
-                    if (b.emissive < 0.5f) b.visualScale = 800.f;
         }
         ImGui::Separator();
 
-        // ── Orbite ────────────────────────────────────────────────────
         ImGui::Checkbox("Afficher trail orbite", &sim.showTrail);
         if (sim.trailBody >= 0 && sim.trailBody < (int)bodies.size()) {
             ImGui::SameLine();
@@ -202,7 +264,7 @@ public:
         }
         ImGui::Separator();
 
-        // ── Debug ─────────────────────────────────────────────────────
+        // ══ Debug ════════════════════════════════════════════════════
         if (ImGui::CollapsingHeader("Debug technique")) {
             ImGui::Text("Corps envoyes au GPU : %d / %d", drawnBodies, (int)bodies.size());
             glm::dvec3 bc = Physics::barycenter(bodies, fg);
@@ -221,30 +283,28 @@ public:
         ImGui::Text("FPS : %.1f", fps);
         ImGui::End();
 
-        // Barre d'aide — screenH est en POINTS logiques ImGui, pas en
-        // pixels framebuffer (les deux diffèrent d'un facteur 2 sur Retina).
+        // ── Barre d'aide ──────────────────────────────────────────────
+        // screenH est en POINTS logiques ImGui, pas en pixels framebuffer
+        // (les deux diffèrent d'un facteur 2 sur Retina).
         ImGui::SetNextWindowPos(ImVec2(10, screenH - 44), ImGuiCond_Always);
         ImGui::Begin("##help", nullptr,
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
             ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoBackground);
-        ImGui::TextDisabled("Clic G + glisser : orbite   |   Molette : zoom   |   Espace : pause");
+        if (freeMode)
+            ImGui::TextDisabled("V : mode orbite   |   WASD + Espace/C : voler   |"
+                                "   Maj : turbo   |   Molette : vitesse   |   P : pause");
+        else
+            ImGui::TextDisabled("V : vol libre   |   Clic G + glisser : orbite   |"
+                                "   Molette : zoom   |   Espace ou P : pause");
         ImGui::End();
 
         return camDirty;
     }
 
-    // Entre dans le contexte porté par un corps (cible = origine exacte).
-    static void enterBodyContext(Camera& cam, const FrameGraph& fg,
-                                 const std::vector<Body>& bodies, int i)
-    {
-        int f = fg.frameAnchoredTo(i);
-        if (f >= 0) {
-            cam.frame  = f;
-            cam.target = glm::dvec3(0.0);   // exactement zéro, pour toujours
-        } else {
-            cam.frame  = bodies[i].frame;
-            cam.target = bodies[i].pos;
-        }
+    // Le bouton « Basculer » de l'UI passe par ce drapeau pour que main
+    // reste le seul endroit qui pilote le changement de mode.
+    bool consumeToggleRequest() {
+        bool t = m_toggleRequested; m_toggleRequested = false; return t;
     }
 
     void setInitialBodies(const std::vector<Body>& b, const FrameGraph& fg) {
@@ -254,7 +314,8 @@ public:
 
 private:
     std::vector<Body> m_initialBodies;
-    double            m_energy0 = 0.0;
+    double            m_energy0        = 0.0;
+    bool              m_toggleRequested = false;
 
     // Parcours récursif : chaque contexte sous son vrai parent. Un affichage
     // linéaire trié par index rangerait la Lune sous Neptune.
@@ -277,6 +338,28 @@ private:
     // Écart entre deux doubles consécutifs à cette magnitude
     static double ulpOf(double magnitude) {
         return std::nextafter(magnitude, 1e308) - magnitude;
+    }
+
+    static std::string formatDistance(double km) {
+        char buf[64];
+        if (km >= Constants::AU_KM * 0.01)
+            snprintf(buf, sizeof buf, "%.4f UA", km / Constants::AU_KM);
+        else if (km >= 1.0)
+            snprintf(buf, sizeof buf, "%.0f km", km);
+        else
+            snprintf(buf, sizeof buf, "%.1f m", km * 1000.0);
+        return std::string(buf);
+    }
+
+    static std::string formatSpeed(double kms) {
+        char buf[64];
+        if (kms >= 1000.0)
+            snprintf(buf, sizeof buf, "%.3e km/s", kms);
+        else if (kms >= 1.0)
+            snprintf(buf, sizeof buf, "%.2f km/s", kms);
+        else
+            snprintf(buf, sizeof buf, "%.0f m/s", kms * 1000.0);
+        return std::string(buf);
     }
 
     static std::string formatTime(double seconds) {

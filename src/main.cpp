@@ -16,6 +16,8 @@
 #include "Frame.hpp"
 #include "BodyFactory.hpp"
 #include "Camera.hpp"
+#include "Navigation.hpp"
+#include "VisualScale.hpp"
 #include "Simulation.hpp"
 #include "Renderer.hpp"
 #include "UI.hpp"
@@ -32,35 +34,26 @@ static UI                  g_ui;
 static bool   g_mouseDrag = false;
 static double g_lastMx = 0, g_lastMy = 0;
 
-// ─────────────────────────────────────────────────────────────────────
-//  Zoom : la distance minimale dépend du corps suivi, pas du Soleil.
-// ─────────────────────────────────────────────────────────────────────
-static float minZoomDistance()
-{
-    int fi = g_ui.followBodyIndex;
-    if (fi >= 0 && fi < (int)g_sys.bodies.size()) {
-        const Body& b = g_sys.bodies[fi];
-        return float(b.radius * double(b.visualScale) * 1.15);
-    }
-    return float(Constants::RADIUS_SUN * 1.05);
-}
-
 static void clampZoom()
 {
-    g_camera.distance = glm::clamp(g_camera.distance,
-        minZoomDistance(), float(Constants::AU_KM * 60.0));
+    float mn = Navigation::minZoomDistance(g_sys.bodies, g_ui.followBodyIndex,
+                                           Constants::RADIUS_SUN);
+    g_camera.distance = glm::clamp(g_camera.distance, mn,
+                                   float(Constants::AU_KM * 60.0));
+}
+
+static void applyVisualScale()
+{
+    VisualScale::apply(g_sys.bodies, g_sys.frames, g_ui.scaleMode, g_ui.scaleK);
 }
 
 // ─────────────────────────────────────────────────────────────────────
 static void initScene()
 {
     g_sys = BodyFactory::makeSolarSystem();
+    applyVisualScale();
 
-    // À 3 UA, une planète à l'échelle réelle fait une fraction de pixel.
-    // L'utilisateur peut revenir aux échelles réelles depuis l'UI.
-    for (auto& b : g_sys.bodies)
-        if (b.emissive < 0.5f) b.visualScale = 800.f;
-
+    g_camera.mode     = Camera::Mode::Orbit;
     g_camera.frame    = g_sys.sunFrame;    // contexte héliocentrique
     g_camera.target   = glm::dvec3(0);
     g_camera.theta    = 0.f;
@@ -71,9 +64,7 @@ static void initScene()
 
     g_sim.simTime = 0.0;
     g_sim.invalidate();
-
-    // Trace l'orbite de la Terre (index 3 : Soleil, Mercure, Venus, Terre)
-    g_sim.setTrailBody(3, g_sys.bodies);
+    g_sim.setTrailBody(3, g_sys.bodies);   // la Terre
 
     g_ui.followBodyIndex = -1;
     g_ui.setInitialBodies(g_sys.bodies, g_sys.frames);
@@ -92,13 +83,26 @@ static void mouseButtonCB(GLFWwindow*, int btn, int action, int)
 static void cursorPosCB(GLFWwindow*, double mx, double my)
 {
     if (g_mouseDrag && !ImGui::GetIO().WantCaptureMouse) {
-        float dx = float(mx - g_lastMx) * 0.005f;
-        float dy = float(my - g_lastMy) * 0.005f;
-        g_camera.theta -= dx;
-        g_camera.phi = glm::clamp(g_camera.phi - dy,
-            -glm::half_pi<float>() + 0.05f,
-             glm::half_pi<float>() - 0.05f);
-        g_camera.updateFromOrbit();
+        float dx = float(mx - g_lastMx);
+        float dy = float(my - g_lastMy);
+
+        if (g_camera.mode == Camera::Mode::Free) {
+            // Convention FPS : souris vers le bas = on regarde vers le bas.
+            const float s = 0.003f;
+            g_camera.yaw   -= dx * s;
+            g_camera.pitch -= dy * s;
+            g_camera.pitch = glm::clamp(g_camera.pitch,
+                -glm::half_pi<float>() + 0.01f,
+                 glm::half_pi<float>() - 0.01f);
+            g_camera.updateFreeOrientation();
+        } else {
+            const float s = 0.005f;
+            g_camera.theta -= dx * s;
+            g_camera.phi = glm::clamp(g_camera.phi - dy * s,
+                -glm::half_pi<float>() + 0.05f,
+                 glm::half_pi<float>() - 0.05f);
+            g_camera.updateFromOrbit();
+        }
     }
     g_lastMx = mx; g_lastMy = my;
 }
@@ -106,9 +110,70 @@ static void cursorPosCB(GLFWwindow*, double mx, double my)
 static void scrollCB(GLFWwindow*, double, double dy)
 {
     if (ImGui::GetIO().WantCaptureMouse) return;
-    g_camera.distance *= (dy > 0) ? 0.85f : 1.15f;
-    clampZoom();
-    g_camera.updateFromOrbit();
+
+    if (g_camera.mode == Camera::Mode::Free) {
+        // En vol libre la molette règle le multiplicateur de vitesse.
+        g_camera.speedBoost *= (dy > 0) ? 1.25f : 0.8f;
+        g_camera.speedBoost = glm::clamp(g_camera.speedBoost, 0.01f, 1000.f);
+    } else {
+        g_camera.distance *= (dy > 0) ? 0.85f : 1.15f;
+        clampZoom();
+        g_camera.updateFromOrbit();
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Bascule Orbite <-> Libre (touche V)
+// ─────────────────────────────────────────────────────────────────────
+static void toggleCameraMode()
+{
+    if (g_camera.mode == Camera::Mode::Orbit) {
+        // Vers le vol libre : on lâche le suivi et on laisse les sphères
+        // d'influence gérer le contexte au fil du déplacement.
+        g_camera.toFree();
+        g_ui.followBodyIndex = -1;
+        g_ui.autoContext     = true;
+    } else {
+        // Retour en orbite autour du corps le plus proche : on entre dans
+        // son contexte et il devient le centre exact de l'écran.
+        auto n = Navigation::nearestBody(g_camera, g_sys.bodies, g_sys.frames);
+        if (n.index >= 0) {
+            Navigation::focusOn(g_camera, g_sys.frames, g_sys.bodies, n.index);
+            g_ui.followBodyIndex = n.index;
+            clampZoom();
+            g_camera.updateFromOrbit();
+        } else {
+            g_camera.toOrbit(g_camera.target);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+//  Vol libre : WASD + montée/descente, vitesse indexée sur l'altitude
+// ─────────────────────────────────────────────────────────────────────
+static void updateFreeFlight(float dt)
+{
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.WantCaptureKeyboard) return;
+
+    glm::dvec3 axis(0.0);
+    if (ImGui::IsKeyDown(ImGuiKey_W)) axis.z += 1.0;
+    if (ImGui::IsKeyDown(ImGuiKey_S)) axis.z -= 1.0;
+    if (ImGui::IsKeyDown(ImGuiKey_D)) axis.x += 1.0;
+    if (ImGui::IsKeyDown(ImGuiKey_A)) axis.x -= 1.0;
+    if (ImGui::IsKeyDown(ImGuiKey_Space)) axis.y += 1.0;
+    if (ImGui::IsKeyDown(ImGuiKey_C))     axis.y -= 1.0;
+
+    if (glm::length(axis) < 1e-9) return;
+    axis = glm::normalize(axis);
+
+    auto   n = Navigation::nearestBody(g_camera, g_sys.bodies, g_sys.frames);
+    double v = Navigation::freeFlySpeed(n.altitude, g_camera.speedBoost);
+
+    if (ImGui::IsKeyDown(ImGuiKey_LeftShift)) v *= 5.0;   // turbo
+    if (ImGui::IsKeyDown(ImGuiKey_LeftCtrl))  v *= 0.2;   // précision
+
+    g_camera.moveFree(axis * v * double(dt));
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -145,8 +210,7 @@ int main()
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    ImGui::GetIO().ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     ImGui::StyleColorsDark();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 330 core");
@@ -158,20 +222,25 @@ int main()
     while (!glfwWindowShouldClose(window))
     {
         glfwPollEvents();
+        ImGuiIO& io = ImGui::GetIO();
 
         g_sim.step(g_sys.bodies, g_sys.frames);
 
-        int fi = g_ui.followBodyIndex;
-        if (fi >= 0 && fi < (int)g_sys.bodies.size()) {
+        // ── Caméra ───────────────────────────────────────────────────
+        if (g_camera.mode == Camera::Mode::Free) {
+            updateFreeFlight(io.DeltaTime);
+        }
+        else if (g_ui.followBodyIndex >= 0 &&
+                 g_ui.followBodyIndex < (int)g_sys.bodies.size()) {
             // Suivre = vivre dans le contexte du corps. La cible reste
             // exactement (0,0,0) : rien à recalculer, aucune dérive.
             clampZoom();
             g_camera.updateFromOrbit();
         }
-        else if (g_ui.autoContext) {
-            // Caméra libre : on bascule vers le contexte le plus profond
-            // dont la sphère d'influence nous contient. La conversion est
-            // une translation exacte — aucune discontinuité à l'écran.
+
+        // Bascule automatique de contexte par sphère d'influence.
+        // Translation exacte : rien ne saute à l'écran.
+        if (g_ui.autoContext && g_ui.followBodyIndex < 0) {
             int nf = g_sys.frames.bestFrameFor(g_camera.pos, g_camera.frame,
                                                g_sys.bodies);
             if (nf != g_camera.frame) {
@@ -200,18 +269,34 @@ int main()
                                      glm::vec3(0.35f, 0.75f, 1.f));
         }
 
+        // ── ImGui ────────────────────────────────────────────────────
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplGlfw_NewFrame();
         ImGui::NewFrame();
 
+        auto nearInfo = Navigation::nearestBody(g_camera, g_sys.bodies, g_sys.frames);
+
         // DisplaySize est en points logiques — sur Retina fbH vaut le double.
         bool camDirty = g_ui.draw(g_camera, g_sys.bodies, g_sys.frames, g_sim,
                                   io.Framerate, io.DisplaySize.y,
-                                  g_renderer.visibleCount());
-        if (camDirty) { clampZoom(); g_camera.updateFromOrbit(); }
+                                  g_renderer.visibleCount(), nearInfo);
+        if (g_ui.scaleDirty) { applyVisualScale(); g_ui.scaleDirty = false; camDirty = true; }
+        if (camDirty) {
+            if (g_camera.mode == Camera::Mode::Orbit) { clampZoom(); g_camera.updateFromOrbit(); }
+            else g_camera.updateFreeOrientation();
+        }
 
-        if (ImGui::IsKeyPressed(ImGuiKey_Space) && !io.WantCaptureKeyboard)
-            g_sim.paused = !g_sim.paused;
+        // ── Raccourcis clavier ───────────────────────────────────────
+        if (g_ui.consumeToggleRequest()) toggleCameraMode();
+        if (!io.WantCaptureKeyboard) {
+            if (ImGui::IsKeyPressed(ImGuiKey_V, false)) toggleCameraMode();
+            // Espace = pause en mode orbite ; en vol libre il sert à monter.
+            if (g_camera.mode == Camera::Mode::Orbit &&
+                ImGui::IsKeyPressed(ImGuiKey_Space, false))
+                g_sim.paused = !g_sim.paused;
+            if (ImGui::IsKeyPressed(ImGuiKey_P, false))
+                g_sim.paused = !g_sim.paused;
+        }
 
         ImGui::Render();
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
