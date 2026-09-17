@@ -52,7 +52,11 @@ public:
         m_uExposure = glGetUniformLocation(m_prog, "uExposure");
         m_uScreenH  = glGetUniformLocation(m_prog, "uScreenH");
         m_uCache    = glGetUniformLocation(m_prog, "uCache");
-        m_uUseCache = glGetUniformLocation(m_prog, "uUseCache");
+        m_uUseCache  = glGetUniformLocation(m_prog, "uUseCache");
+        m_uCloudBase = glGetUniformLocation(m_prog, "uCloudBase");
+        m_uTime      = glGetUniformLocation(m_prog, "uTime");
+        m_uLightTint = glGetUniformLocation(m_prog, "uLightTint");
+        m_uCubeK     = glGetUniformLocation(m_prog, "uCubeK");
 
         m_trailProg = buildProgram(Shaders::TRAIL_VS, Shaders::TRAIL_FS);
         cacheBodyLocations(m_trailProg, m_tloc);
@@ -65,6 +69,10 @@ public:
     }
 
     // ── Passe corps ───────────────────────────────────────────────────
+    void setClouds(bool on) { m_clouds = on; }
+    bool clouds() const     { return m_clouds; }
+    void setTime(double t)  { m_time = t; }
+
     void draw(const Camera& cam, const std::vector<Body>& bodies,
               const FrameGraph& fg, int fbW, int fbH, float exposure = 1.f)
     {
@@ -141,6 +149,23 @@ public:
         m_cache.bind(0);
         glUniform1i(m_uCache, 0);
         glUniform1f(m_uUseCache, (m_cache.ready() && m_useCache) ? 1.f : 0.f);
+        glUniform1f(m_uCubeK, m_cache.cubeK());
+        glUniform1f(m_uCloudBase,
+                    (m_cache.ready() && m_useCache && m_clouds) ? m_cache.cloudBase() : -1.f);
+        glUniform1f(m_uTime, float(m_time));
+
+        // Teinte de l'eclairage. La couleur d'un corps emissif est sa teinte
+        // ARTISTIQUE, pas le spectre qu'il emet : normaliser (1, 0.85, 0.2)
+        // donnait des nuages franchement jaunes, alors que la surface, elle,
+        // est eclairee en blanc. On ne garde qu'un souffle de la teinte.
+        glm::vec3 tint(1.f, 0.98f, 0.95f);
+        for (const Body* b : m_visible)
+            if (b->emissive > 0.5f) {
+                glm::vec3 hue = glm::normalize(b->color) * 1.732f;   // ~blanc
+                tint = glm::mix(glm::vec3(1.f), hue, 0.18f);
+                break;
+            }
+        glUniform3fv(m_uLightTint, 1, glm::value_ptr(tint));
 
         glm::mat4 invRot = cam.invRotationMatrix();
         glUniformMatrix4fv(m_uInvRot, 1, GL_FALSE, glm::value_ptr(invRot));
@@ -230,7 +255,8 @@ private:
     BodyLoc m_loc[Constants::MAX_BODIES];
     BodyLoc m_tloc[Constants::MAX_BODIES];
     GLint m_uInvRot = -1, m_uHalfW = -1, m_uHalfH = -1, m_uCount = -1,
-          m_uExposure = -1, m_uScreenH = -1, m_uCache = -1, m_uUseCache = -1;
+          m_uExposure = -1, m_uScreenH = -1, m_uCache = -1, m_uUseCache = -1,
+          m_uCloudBase = -1, m_uTime = -1, m_uLightTint = -1, m_uCubeK = -1;
     GLint m_tRot = -1, m_tHalfW = -1, m_tHalfH = -1, m_tCount = -1,
           m_tBodyCount = -1, m_tTrailColor = -1;
 
@@ -246,6 +272,8 @@ private:
     double m_aspect = 1.0;
     float  m_halfW  = 1.f, m_halfH = 1.f;
     bool   m_useCache = true;
+    bool   m_clouds   = true;
+    double m_time     = 0.0;
 
     static void cacheBodyLocations(GLuint prog, BodyLoc* out) {
         char buf[64];

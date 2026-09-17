@@ -13,6 +13,7 @@
 
 #include "NoiseGLSL.hpp"
 #include "SurfaceGLSL.hpp"
+#include "CloudsGLSL.hpp"
 #include <string>
 
 namespace Shaders {
@@ -47,8 +48,13 @@ static const char* CUBE = R"GLSL(
 // carte équirectangulaire : densité de texels uniforme, et surtout aucune
 // singularité aux pôles — une équirectangulaire y écrase toute une ligne
 // de texels sur un point.
+// uCubeK > 1 : chaque face est cuite sur un angle LEGEREMENT plus large que
+// 90 degres. L'echantillonnage ramene ensuite les +-1 reels dans la partie
+// interne de la texture, si bien que le filtrage lineaire du bord dispose
+// de vrais texels voisins au lieu de repeter le dernier -- sans quoi une
+// couture fine apparait le long de chaque arete du cube.
 vec3 dirFromFace(int face, vec2 uv) {
-    vec2 t = uv * 2.0 - 1.0;
+    vec2 t = (uv * 2.0 - 1.0) * uCubeK;
     if (face == 0) return normalize(vec3( 1.0, -t.y, -t.x));
     if (face == 1) return normalize(vec3(-1.0, -t.y,  t.x));
     if (face == 2) return normalize(vec3( t.x,  1.0,  t.y));
@@ -73,7 +79,7 @@ void faceFromDir(vec3 d, out float face, out vec2 uv) {
         if (d.z > 0.0) { face = 4.0; st = vec2( d.x, -d.y); }
         else           { face = 5.0; st = vec2(-d.x, -d.y); }
     }
-    uv = st / max(ma, 1e-9) * 0.5 + 0.5;
+    uv = st / max(ma, 1e-9) / uCubeK * 0.5 + 0.5;
 }
 )GLSL";
 
@@ -104,6 +110,10 @@ uniform float      uScreenH;    // hauteur du framebuffer, en pixels
 // Remplace ~400 évaluations de hachage par fragment par une lecture.
 uniform sampler2DArray uCache;
 uniform float          uUseCache;
+uniform float          uCubeK;       // debord des faces de cube
+uniform float          uCloudBase;   // 1ere couche de nuages (< 0 = aucune)
+uniform float          uTime;        // temps simule, fait tourner la meteo
+uniform vec3           uLightTint;   // couleur de l'etoile eclairante
 
 // Intersection analytique rayon/sphère (rd normalisé).
 //
@@ -135,6 +145,14 @@ static const char* FS_BODY = R"GLSL(
 // fine que le pixel ne fait qu'ajouter du scintillement. On indexe donc
 // le nombre d'octaves sur la taille apparente du corps à l'écran : une
 // octave de plus à chaque doublement. C'est la première brique du LOD.
+// Pas de marche des nuages : meme principe que les octaves, indexe sur la
+// taille apparente. Une planete de quelques pixels n'a pas besoin de 32
+// pas pour montrer sa couche nuageuse.
+int cloudStepsFor(float radius, float dist) {
+    float px = (radius / max(dist, 1e-6)) / (2.0 * uHalfH) * uScreenH;
+    return clamp(int(px * 0.06), 6, 40);
+}
+
 int octavesFor(float radius, float dist) {
     float px = (radius / max(dist, 1e-6)) / (2.0 * uHalfH) * uScreenH;
     return clamp(int(log2(max(px, 2.0))) + 1, 3, 10);
@@ -361,6 +379,33 @@ void main() {
             col = shadePlanet(hitPt, N, idBest, oct);
     }
 
+    // ── Nuages ───────────────────────────────────────────────────────
+    // On cherche la coquille traversee la plus proche : elle peut
+    // appartenir a un corps qu'on ne touche pas (nuages vus au limbe).
+    if (uCloudBase >= 0.0) {
+        int   idCloud = -1;
+        float bestEntry = 1e30;
+        for (int i = 0; i < uBodyCount; i++) {
+            if (uBodies[i].emissive > 0.5 || uBodies[i].slot < 0.0) continue;
+            if (uBodies[i].surfType > 2.5) continue;      // geante gazeuse
+            float c0, c1;
+            if (!raySphere(ro, rd, uBodies[i].posRel,
+                           uBodies[i].radius * CLOUD_TOP, c0, c1)) continue;
+            float entry = max(c0, 0.0);
+            if (entry < tBest && entry < bestEntry) { bestEntry = entry; idCloud = i; }
+        }
+        if (idCloud >= 0) {
+            vec3 lightPos = vec3(0.0);
+            for (int i = 0; i < uBodyCount; i++)
+                if (uBodies[i].emissive > 0.5) { lightPos = uBodies[i].posRel; break; }
+
+            int steps = cloudStepsFor(uBodies[idCloud].radius,
+                                      length(uBodies[idCloud].posRel));
+            vec4 cl = marchClouds(ro, rd, idCloud, tBest, lightPos, steps);
+            col = cl.rgb + col * cl.a;      // les nuages sont DEVANT la surface
+        }
+    }
+
     // ── Tone mapping sur la LUMINANCE ────────────────────────────────
     // Un Reinhard par canal comprime davantage le canal fort que le canal
     // faible : toute couleur saturée est ramenée vers le gris. Le rouille
@@ -380,7 +425,8 @@ void main() {
 
 // Montage final du fragment shader des corps.
 inline std::string fragmentSource() {
-    return std::string(FS_HEAD) + NOISE + CUBE + SURFACE + FS_BODY;
+    return std::string(FS_HEAD) + NOISE + CUBE + SURFACE
+         + CLOUDS_MAP + CLOUDS_MARCH + FS_BODY;
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -406,20 +452,27 @@ uniform float uSurfType;
 uniform float uSurfSeed;
 uniform vec3  uTint;
 uniform int   uOctaves;
+uniform int   uMode;      // 0 = surface, 1 = carte de nuages
+uniform float uCubeK;     // debord des faces de cube
 )GLSL";
 
 static const char* BAKE_MAIN = R"GLSL(
 void main() {
-    vec3  n = dirFromFace(uFace, vUV);
-    float gloss;
-    vec3  c = surfaceColor(int(uSurfType), uSurfSeed, uTint, n, uOctaves, gloss);
-    // RGB = albedo, A = brillance du matériau (eau, glace)
-    fragColor = vec4(c, gloss);
+    vec3 n = dirFromFace(uFace, vUV);
+    if (uMode == 1) {
+        // RGB A = couverture, erosion, altitude du sommet, orage
+        fragColor = cloudMap(n, uSurfSeed, int(uSurfType), uOctaves);
+    } else {
+        float gloss;
+        vec3  c = surfaceColor(int(uSurfType), uSurfSeed, uTint, n, uOctaves, gloss);
+        // RGB = albedo, A = brillance du materiau (eau, glace)
+        fragColor = vec4(c, gloss);
+    }
 }
 )GLSL";
 
 inline std::string bakeFragmentSource() {
-    return std::string(BAKE_HEAD) + NOISE + CUBE + SURFACE + BAKE_MAIN;
+    return std::string(BAKE_HEAD) + NOISE + CUBE + SURFACE + CLOUDS_MAP + BAKE_MAIN;
 }
 
 

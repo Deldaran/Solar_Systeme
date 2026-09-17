@@ -53,6 +53,8 @@ public:
         m_uSurfSeed = glGetUniformLocation(m_prog, "uSurfSeed");
         m_uTint     = glGetUniformLocation(m_prog, "uTint");
         m_uOctaves  = glGetUniformLocation(m_prog, "uOctaves");
+        m_uMode     = glGetUniformLocation(m_prog, "uMode");
+        m_uCubeK    = glGetUniformLocation(m_prog, "uCubeK");
 
         glGenFramebuffers(1, &m_fbo);
 
@@ -77,12 +79,15 @@ public:
         const int n = (int)bodies.size();
         if (n <= 0) return;
 
-        if (m_layers != n * FACES) {
+        // Deux jeux de couches : surfaces d'abord, cartes de nuages ensuite.
+        // Un seul echantillonneur pour les deux, donc un seul bind.
+        const int need = n * FACES * 2;
+        if (m_layers != need) {
             if (m_tex) glDeleteTextures(1, &m_tex);
             glGenTextures(1, &m_tex);
             glBindTexture(GL_TEXTURE_2D_ARRAY, m_tex);
             glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8,
-                         m_size, m_size, n * FACES, 0,
+                         m_size, m_size, need, 0,
                          GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
             // Mipmaps : sans elles, une planète réduite à quelques pixels
             // ré-alias la carte à chaque image.
@@ -94,7 +99,7 @@ public:
             glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
             glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
             glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
-            m_layers = n * FACES;
+            m_layers = need;
         }
 
         GLint prevFbo = 0;   // on rendra ensuite dans le framebuffer par défaut
@@ -110,26 +115,32 @@ public:
         int oct = 0; for (int t = m_size; t > 1; t >>= 1) ++oct;   // log2
         oct = std::max(3, oct - 2);
         glUniform1i(m_uOctaves, oct);
+        glUniform1f(m_uCubeK, cubeK());
         m_octaves = oct;
 
-        for (int i = 0; i < n; ++i) {
-            const Body& b = bodies[i];
-            glUniform1f (m_uSurfType, float(b.surfaceType));
-            glUniform1f (m_uSurfSeed, b.surfaceSeed);
-            glUniform3fv(m_uTint, 1, glm::value_ptr(b.color));
+        for (int mode = 0; mode < 2; ++mode) {          // 0 surface, 1 nuages
+            glUniform1i(m_uMode, mode);
+            const int base = mode * n * FACES;
+            for (int i = 0; i < n; ++i) {
+                const Body& b = bodies[i];
+                glUniform1f (m_uSurfType, float(b.surfaceType));
+                glUniform1f (m_uSurfSeed, b.surfaceSeed);
+                glUniform3fv(m_uTint, 1, glm::value_ptr(b.color));
 
-            for (int f = 0; f < FACES; ++f) {
-                glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                                          m_tex, 0, i * FACES + f);
-                if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
-                    fprintf(stderr, "[CACHE] framebuffer incomplet\n");
-                    glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFbo);
-                    return;
+                for (int f = 0; f < FACES; ++f) {
+                    glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                              m_tex, 0, base + i * FACES + f);
+                    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                        fprintf(stderr, "[CACHE] framebuffer incomplet\n");
+                        glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)prevFbo);
+                        return;
+                    }
+                    glUniform1i(m_uFace, f);
+                    glDrawArrays(GL_TRIANGLES, 0, 6);
                 }
-                glUniform1i(m_uFace, f);
-                glDrawArrays(GL_TRIANGLES, 0, 6);
             }
         }
+        m_bodies = n;
 
         glBindVertexArray(0);
         glUseProgram(0);
@@ -150,6 +161,12 @@ public:
     int  faceSize() const { return m_size; }
     int  layers()   const { return m_layers; }
     int  octaves()  const { return m_octaves; }
+    // Premiere couche des cartes de nuages (-1 si le cache n'est pas pret)
+    float cloudBase() const { return m_ready ? float(m_bodies * FACES) : -1.f; }
+
+    // Debord angulaire des faces : 3 texels de marge de chaque cote, pour
+    // que le filtrage lineaire ait de vrais voisins sur les aretes.
+    float cubeK() const { return 1.f + 3.f / float(m_size); }
 
     // Mémoire occupée, en octets (RGBA8)
     size_t bytes() const {
@@ -169,7 +186,8 @@ public:
 private:
     GLuint m_tex = 0, m_fbo = 0, m_vao = 0, m_vbo = 0, m_prog = 0;
     GLint  m_uFace = -1, m_uSurfType = -1, m_uSurfSeed = -1,
-           m_uTint = -1, m_uOctaves = -1;
+           m_uTint = -1, m_uOctaves = -1, m_uMode = -1, m_uCubeK = -1;
+    int    m_bodies = 0;
     int    m_size = 512, m_layers = 0, m_octaves = 0;
     bool   m_ready = false;
 

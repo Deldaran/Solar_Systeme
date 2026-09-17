@@ -34,6 +34,7 @@ public:
     bool              scaleDirty = false;   // main recalcule et remet à false
     bool              surfaceDirty = false; // main recuit le cache et remet à false
     bool              useCache     = true;
+    bool              showClouds   = true;
 
     // Retourne true si la caméra doit être rafraîchie
     bool draw(Camera& cam, std::vector<Body>& bodies, const FrameGraph& fg,
@@ -298,6 +299,8 @@ public:
             ImGui::Text("Corps envoyes au GPU : %d / %d", drawnBodies, (int)bodies.size());
             ImGui::TextDisabled("(inclut les occulteurs hors champ)");
             if (ImGui::Checkbox("Cache de surfaces", &useCache)) { /* main applique */ }
+            ImGui::SameLine();
+            ImGui::Checkbox("Nuages", &showClouds);
             ImGui::SameLine();
             ImGui::TextDisabled("%s", cacheInfo.c_str());
             glm::dvec3 bc = Physics::barycenter(bodies, fg);

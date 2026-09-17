@@ -379,6 +379,8 @@ int main(int argc, char** argv)
             glClearColor(0, 0, 0, 1);
             glClear(GL_COLOR_BUFFER_BIT);
 
+            g_renderer.setTime(g_sim.simTime);
+            g_renderer.setClouds(g_ui.showClouds);
             g_renderer.draw(g_camera, g_sys.bodies, g_sys.frames,
                             fbW, fbH, g_ui.exposure);
             if (g_sim.showTrail)
